@@ -244,7 +244,7 @@ Responsibilities:
 - assign a compact multi-label tag set for later album summarization;
 - cache the result in SQLite so unchanged photos are never re-tagged.
 
-The first provider is a small ONNX Runtime CPU pipeline with a fixed vocabulary and thumbnail-sized input. The purpose is lightweight semantic tagging, not open-ended reasoning.
+The default first provider is `onnx-mobileclip`: an ONNX Runtime CPU pipeline with a fixed vocabulary and thumbnail-sized input. This is the cross-platform default for mixed or uncertain deployment targets because it runs on Intel x86 NAS, ARM NAS, and Apple Silicon development machines with one implementation. The purpose is lightweight semantic tagging, not open-ended reasoning.
 
 Initial label vocabulary should cover the album-description use case, for example:
 
@@ -257,6 +257,12 @@ indoor, outdoor, stage, document, screenshot, product, car
 ```
 
 Per-photo tags are inputs to album summarization only. They must not change album membership.
+
+Runtime selection policy:
+
+- Default: `onnx-mobileclip`.
+- Optional future Intel optimization: `openvino-mobileclip` for x86 NAS deployments where CPU throughput matters more than portability.
+- No first-version TFLite or multimodal-LLM path.
 
 ## AI responsibility boundary
 
@@ -402,7 +408,7 @@ LUMIFLOW_AI_BASE_URL=
 LUMIFLOW_AI_API_KEY=
 LUMIFLOW_AI_MODEL=
 LUMIFLOW_AI_DESCRIPTION_LANGUAGE=zh-CN
-LUMIFLOW_VISION_TAGGER=none
+LUMIFLOW_VISION_TAGGER=none | onnx-mobileclip | openvino-mobileclip
 LUMIFLOW_VISION_MODEL=mobileclip-onnx
 ```
 
