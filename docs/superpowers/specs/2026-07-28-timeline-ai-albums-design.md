@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a timeline album mode for messy photo backups. LumiFlow will recursively scan a read-only photo root, persist photo metadata in SQLite, build deterministic daily virtual albums, name those albums from date/place/holiday metadata, and optionally generate an AI description/keyword summary for each completed album.
+Add a timeline album mode for messy photo backups. LumiFlow will recursively scan a read-only photo root, persist photo metadata in SQLite, build deterministic daily virtual albums, name those albums from date/place/holiday metadata, optionally run local CPU-only vision tagging on changed photos, and optionally generate an AI description/keyword summary for each completed album.
 
 The feature must not copy, move, rename, hard-link, or symlink original photos.
 
@@ -143,6 +143,20 @@ generated_at
 error               nullable last error
 ```
 
+### photo_vision_tags
+
+Cached local vision output. This is generated on-device from thumbnails and does not call a remote AI service.
+
+```text
+photo_id
+model
+input_fingerprint   hash of photo fingerprint + thumbnail fingerprint + prompt/tagset version
+labels_json         ordered label list, e.g. ["family", "meal", "indoor"]
+scores_json         matching confidences
+analyzed_at
+error               nullable last error
+```
+
 ## Incremental scanning
 
 Timeline scanning walks the entire photo root recursively with existing exclude rules.
@@ -151,9 +165,10 @@ For each supported file:
 
 1. Compute `relative_path`, `size_bytes`, `mtime_ns`, and `fingerprint` using file metadata only.
 2. Look up the existing `photos` row by `id = sha1(relative_path)`.
-3. If `fingerprint` is unchanged, skip EXIF, filename parsing, thumbnail invalidation, and AI invalidation.
+3. If `fingerprint` is unchanged, skip EXIF, filename parsing, local vision tagging, thumbnail invalidation, and AI invalidation.
 4. If new or changed, analyze metadata and update the row.
 5. Mark rows that were not seen in the scan as `missing` instead of deleting immediately.
+6. If local vision tagging is enabled, enqueue changed photos for thumbnail-backed tag extraction.
 
 This avoids repeated photo analysis while keeping the original directory read-only.
 
@@ -218,6 +233,31 @@ If multiple places appear in one day, use at most two names plus a count suffix:
 2024-02-10 上海 · 苏州 +1 · 春节
 ```
 
+## Local vision tagging
+
+Local vision tagging is optional and runs before album-level AI description generation.
+
+Responsibilities:
+
+- inspect each new or changed photo locally on CPU only;
+- use generated thumbnails, not originals, as model input;
+- assign a compact multi-label tag set for later album summarization;
+- cache the result in SQLite so unchanged photos are never re-tagged.
+
+The first provider is a small ONNX Runtime CPU pipeline with a fixed vocabulary and thumbnail-sized input. The purpose is lightweight semantic tagging, not open-ended reasoning.
+
+Initial label vocabulary should cover the album-description use case, for example:
+
+```text
+people, portrait, selfie, family, child, couple, pet,
+meal, dessert, coffee,
+city, street, skyline, architecture, temple, park,
+mountain, beach, river, sunset, night,
+indoor, outdoor, stage, document, screenshot, product, car
+```
+
+Per-photo tags are inputs to album summarization only. They must not change album membership.
+
 ## AI responsibility boundary
 
 AI is post-processing only.
@@ -227,6 +267,7 @@ AI does not:
 - scan photos;
 - decide whether a file is a photo;
 - extract EXIF/GPS;
+- run per-photo visual tagging;
 - cut album boundaries;
 - decide album membership;
 - serve images;
@@ -235,7 +276,7 @@ AI does not:
 AI does:
 
 - inspect a low-resolution contact sheet for an existing album;
-- combine visual cues with date/place/holiday/photo-count metadata;
+- combine contact-sheet cues with local vision tags and date/place/holiday/photo-count metadata;
 - generate a description, keywords, and confidence.
 
 If AI fails, albums remain usable with deterministic names and empty or stale descriptions.
@@ -272,6 +313,7 @@ Input metadata:
   "photo_count": 184,
   "time_range": "09:13-22:41",
   "camera_summary": ["iPhone 15 Pro", "X2D 100C"],
+  "vision_tag_summary": ["family", "meal", "indoor", "street", "night"],
   "language": "zh-CN"
 }
 ```
@@ -297,7 +339,8 @@ Compute `input_fingerprint` from:
 - deterministic display name;
 - date/place/holiday fields;
 - selected photo ids;
-- selected photo fingerprints.
+- selected photo fingerprints;
+- selected local vision tag signatures.
 
 If the fingerprint is unchanged, reuse the existing AI description. If it changes, enqueue regeneration.
 
@@ -359,6 +402,8 @@ LUMIFLOW_AI_BASE_URL=
 LUMIFLOW_AI_API_KEY=
 LUMIFLOW_AI_MODEL=
 LUMIFLOW_AI_DESCRIPTION_LANGUAGE=zh-CN
+LUMIFLOW_VISION_TAGGER=none
+LUMIFLOW_VISION_MODEL=mobileclip-onnx
 ```
 
 Compose documentation should keep AI disabled by default. Users who opt into AI add provider settings directly to `docker-compose.yml`.
@@ -376,6 +421,7 @@ Compose documentation should keep AI disabled by default. Users who opt into AI 
 - Database unavailable: startup fails with a clear error because timeline mode depends on it.
 - EXIF parse failure: store available file metadata and continue.
 - Missing or invalid time: assign `time_source=unknown` and group into `Unknown Date`.
+- Local vision tagger failure: keep the photo and album available, store the error, and allow later retry.
 - Reverse geocode failure: leave place empty and retry later.
 - AI failure: keep deterministic album name, store error, retry later.
 - Thumbnail failure: keep original photo serving available.
@@ -390,8 +436,10 @@ Behavior tests should cover:
 - EXIF time beats filename time, filename time beats mtime.
 - Natural-day cutting groups photos by local date.
 - Unknown-time photos go to `Unknown Date`.
+- Local vision tagging runs only for new or changed photos.
+- Cached local vision tags are reused when the input fingerprint is unchanged.
 - Holiday naming adds CN/common holidays.
-- Album membership is unchanged when AI description changes.
+- Album membership is unchanged when local vision tags or AI descriptions change.
 - Contact sheet generation samples large albums deterministically.
 - AI output is cached by input fingerprint.
 - by-id photo/thumb/exif APIs serve the expected original file.
@@ -401,10 +449,11 @@ Behavior tests should cover:
 1. Introduce SQLite schema and repository layer.
 2. Add recursive timeline scanner and incremental metadata analysis.
 3. Generate daily virtual albums and by-id APIs.
-4. Update frontend to consume by-id photo entries.
-5. Add holiday naming and path/GPS place naming.
-6. Add contact sheet generation and AI description worker.
-7. Add documentation and Compose examples with AI disabled by default.
+4. Add thumbnail-backed local vision tagging and SQLite caching.
+5. Update frontend to consume by-id photo entries.
+6. Add holiday naming and path/GPS place naming.
+7. Add contact sheet generation and AI description worker.
+8. Add documentation and Compose examples with AI disabled by default.
 
 ## Acceptance criteria
 
@@ -412,6 +461,7 @@ Behavior tests should cover:
 - Re-running scan on unchanged files does not repeat EXIF analysis.
 - Timeline mode creates daily virtual albums from recursive files.
 - Album names include date and optionally place/holiday.
+- Local vision tagging runs on-device and is reused for unchanged photos.
 - AI descriptions are generated only after albums are created.
 - AI failures do not prevent album browsing.
 - Frontend can browse and open photos with duplicate filenames in different directories.
