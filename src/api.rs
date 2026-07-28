@@ -1,7 +1,8 @@
-use crate::config::Config;
+use crate::config::{AlbumMode, Config};
 use crate::scanner::manifest::{AlbumDetail, Manifest};
 use crate::scanner::walk;
 use crate::thumbnail::{self, ThumbnailPool};
+use crate::timeline::TimelineService;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -13,7 +14,8 @@ use tokio::sync::RwLock;
 /// Shared application state.
 pub struct AppState {
     pub config: Config,
-    pub manifest: Arc<RwLock<Manifest>>,
+    pub manifest: Option<Arc<RwLock<Manifest>>>,
+    pub timeline: Option<Arc<TimelineService>>,
     pub exclude: Regex,
     #[allow(dead_code)]
     pub thumbnails: ThumbnailPool,
@@ -23,12 +25,31 @@ pub type SharedState = Arc<AppState>;
 
 // --- GET /api/albums ---
 
-pub async fn list_albums(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let manifest = state.manifest.read().await;
-    Json(serde_json::json!({
-        "albums": &manifest.albums,
-        "updated": manifest.updated.to_rfc3339(),
-    }))
+pub async fn list_albums(
+    State(state): State<SharedState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.config.album_mode {
+        AlbumMode::Folders => {
+            let manifest = state
+                .manifest
+                .as_ref()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                .read()
+                .await;
+            Ok(Json(serde_json::json!({
+                "albums": &manifest.albums,
+                "updated": manifest.updated.to_rfc3339(),
+            })))
+        }
+        AlbumMode::Timeline => {
+            let service = timeline_service(&state)?;
+            let albums = service.db().list_albums().map_err(internal_error)?;
+            Ok(Json(serde_json::json!({
+                "albums": albums,
+                "updated": chrono::Utc::now().to_rfc3339(),
+            })))
+        }
+    }
 }
 
 // --- GET /api/albums/:name ---
@@ -36,26 +57,72 @@ pub async fn list_albums(State(state): State<SharedState>) -> Json<serde_json::V
 pub async fn get_album(
     State(state): State<SharedState>,
     Path(name): Path<String>,
-) -> Result<Json<AlbumDetail>, StatusCode> {
-    let photos = walk::get_album_detail(&state.config.photos_path, &name, &state.exclude)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    Ok(Json(AlbumDetail { name, photos }))
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.config.album_mode {
+        AlbumMode::Folders => {
+            let photos = walk::get_album_detail(&state.config.photos_path, &name, &state.exclude)
+                .ok_or(StatusCode::NOT_FOUND)?;
+            Ok(Json(
+                serde_json::to_value(AlbumDetail { name, photos }).map_err(internal_error)?,
+            ))
+        }
+        AlbumMode::Timeline => {
+            let detail = timeline_service(&state)?
+                .db()
+                .get_album(&name)
+                .map_err(internal_error)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            Ok(Json(serde_json::to_value(detail).map_err(internal_error)?))
+        }
+    }
 }
 
 // --- POST /api/rescan ---
 
 pub async fn rescan(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let manifest_path = state.config.data_path.join("manifest.json");
+    if state.config.album_mode == AlbumMode::Timeline {
+        return match timeline_service(&state) {
+            Ok(service) => match service.rescan().await {
+                Ok(report) => Json(serde_json::json!({
+                    "status": "ok",
+                    "found": report.scan.found,
+                    "analyzed": report.scan.analyzed,
+                    "reused": report.scan.reused,
+                    "marked_missing": report.scan.marked_missing,
+                    "albums_count": report.albums_count,
+                    "updated": chrono::Utc::now().to_rfc3339(),
+                })),
+                Err(error) => {
+                    tracing::error!("timeline rescan failed: {error:#}");
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": error.to_string(),
+                    }))
+                }
+            },
+            Err(_) => Json(serde_json::json!({
+                "status": "error",
+                "message": "timeline service is unavailable",
+            })),
+        };
+    }
 
+    let manifest_path = state.config.data_path.join("manifest.json");
     match walk::scan(
         &state.config.photos_path,
         state.config.exclude_regex.as_str(),
     ) {
         Ok(new_manifest) => {
-            let mut old = state.manifest.write().await;
-
-            // Log what changed
+            let mut old = match &state.manifest {
+                Some(manifest) => manifest.write().await,
+                None => {
+                    tracing::error!("folder manifest is unavailable");
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "message": "folder manifest is unavailable",
+                    }));
+                }
+            };
             let diff = new_manifest.diff(&old);
             if diff.has_changes() {
                 tracing::info!(
@@ -64,24 +131,21 @@ pub async fn rescan(State(state): State<SharedState>) -> Json<serde_json::Value>
                     diff.removed_albums.len()
                 );
             }
-
             *old = new_manifest.clone();
-
-            if let Err(e) = new_manifest.save(&manifest_path) {
-                tracing::error!("failed to save manifest: {}", e);
+            if let Err(error) = new_manifest.save(&manifest_path) {
+                tracing::error!("failed to save manifest: {error}");
             }
-
             Json(serde_json::json!({
                 "status": "ok",
                 "albums_count": new_manifest.albums.len(),
                 "updated": new_manifest.updated.to_rfc3339(),
             }))
         }
-        Err(e) => {
-            tracing::error!("rescan failed: {}", e);
+        Err(error) => {
+            tracing::error!("rescan failed: {error}");
             Json(serde_json::json!({
                 "status": "error",
-                "message": e.to_string(),
+                "message": error.to_string(),
             }))
         }
     }
@@ -128,6 +192,52 @@ pub async fn serve_thumbnail(
     }
 }
 
+pub async fn serve_thumbnail_by_id(
+    State(state): State<SharedState>,
+    Path(photo_id): Path<String>,
+) -> Result<axum::response::Response, StatusCode> {
+    let service = timeline_service(&state)?;
+    let photo = service
+        .db()
+        .get_photo(&photo_id)
+        .map_err(internal_error)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let source = resolve_timeline_photo_path(service, &photo.relative_path)?;
+    let thumb_path = thumbnail::timeline_thumb_path(&state.config.data_path, &photo.id);
+
+    if thumbnail::timeline_thumb_is_fresh(&state.config.data_path, &photo.id, &photo.fingerprint) {
+        return serve_cached_file(&thumb_path, "image/webp").await;
+    }
+
+    let source_for_generation = source.clone();
+    let thumb_for_generation = thumb_path.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        ThumbnailPool::generate_on_demand(&source_for_generation, &thumb_for_generation)
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(|error| {
+        tracing::warn!("timeline thumbnail generation failed for {photo_id}: {error:#}");
+        StatusCode::NOT_FOUND
+    })?;
+    thumbnail::write_timeline_thumb_fingerprint(
+        &state.config.data_path,
+        &photo.id,
+        &photo.fingerprint,
+    )
+    .map_err(internal_error)?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "image/webp"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        data,
+    )
+        .into_response())
+}
+
 async fn serve_cached_file(
     path: &std::path::Path,
     mime: &str,
@@ -165,4 +275,50 @@ pub async fn serve_exif(
             Err(StatusCode::UNPROCESSABLE_ENTITY)
         }
     }
+}
+
+pub async fn serve_exif_by_id(
+    State(state): State<SharedState>,
+    Path(photo_id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let exif = timeline_service(&state)?
+        .db()
+        .get_photo_exif(&photo_id)
+        .map_err(internal_error)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(exif))
+}
+
+pub(crate) fn resolve_timeline_photo_path(
+    service: &TimelineService,
+    relative_path: &str,
+) -> Result<std::path::PathBuf, StatusCode> {
+    let root = service
+        .config()
+        .photos_path
+        .canonicalize()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let target = root
+        .join(relative_path)
+        .canonicalize()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    if !target.starts_with(&root) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !target.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(target)
+}
+
+fn timeline_service(state: &AppState) -> Result<&Arc<TimelineService>, StatusCode> {
+    state
+        .timeline
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn internal_error(error: impl std::fmt::Display) -> StatusCode {
+    tracing::error!("API operation failed: {error}");
+    StatusCode::INTERNAL_SERVER_ERROR
 }

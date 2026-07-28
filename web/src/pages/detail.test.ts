@@ -25,6 +25,7 @@ describe('detail swipe navigation', () => {
 describe('detail original download', () => {
   test('renders same-origin original download link for mobile detail UI', () => {
     const html = renderOriginalDownloadLink('Test Album', {
+      id: 0,
       name: 'DSCF6138.HIF',
       width: 5152,
       height: 7728,
@@ -36,6 +37,20 @@ describe('detail original download', () => {
     expect(html).toContain('href="/api/photos/Test%20Album/DSCF6138.HIF?download=1"')
     expect(html).toContain('download="DSCF6138.HIF"')
     expect(html).toContain('下载原图')
+  })
+
+  test('renders a by-ID original download link for timeline photos', () => {
+    const html = renderOriginalDownloadLink('day:2026-06-02', {
+      id: 'sha1-photo-id',
+      name: 'DSCF6138.HIF',
+      width: 5152,
+      height: 7728,
+      size_bytes: 8178892,
+      format: 'HIF',
+    })
+
+    expect(html).toContain('href="/api/photos/by-id/sha1-photo-id?download=1"')
+    expect(html).toContain('download="DSCF6138.HIF"')
   })
 })
 

@@ -1,5 +1,5 @@
 use crate::api::{self, SharedState};
-use crate::config::Config;
+use crate::config::{AlbumMode, Config};
 use crate::embedded::Frontend;
 use crate::scanner::manifest::Manifest;
 use crate::scanner::walk;
@@ -19,65 +19,68 @@ use tower_http::cors::{Any, CorsLayer};
 
 /// Build the Axum router and start the server.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
-    // Scan and load manifest on startup.
     let exclude = Regex::new(&config.exclude_regex).context("invalid exclude regex")?;
-    let manifest_path = config.data_path.join("manifest.json");
-
-    let manifest = Arc::new(RwLock::new(match Manifest::load(&manifest_path) {
-        Some(cached) => {
-            tracing::info!(
-                "loaded cached manifest: {} albums, updated {}",
-                cached.albums.len(),
-                cached.updated.to_rfc3339()
-            );
-            cached
-        }
-        None => {
-            tracing::info!("no cached manifest found, scanning...");
-            let m = walk::scan(&config.photos_path, &config.exclude_regex)
-                .context("initial scan failed")?;
-            if let Err(e) = m.save(&manifest_path) {
-                tracing::warn!("failed to save initial manifest: {}", e);
-            }
-            tracing::info!("initial scan complete: {} albums", m.albums.len());
-            m
-        }
-    }));
-
-    // Start filesystem watcher (auto-detect changes).
-    crate::scanner::watcher::start(
-        config.photos_path.clone(),
-        config.data_path.clone(),
-        config.exclude_regex.clone(),
-        manifest.clone(),
-    );
-
     let pool = ThumbnailPool::new(&config);
+
+    let (manifest, timeline) = match config.album_mode {
+        AlbumMode::Folders => {
+            let manifest_path = config.data_path.join("manifest.json");
+            let manifest = Arc::new(RwLock::new(match Manifest::load(&manifest_path) {
+                Some(cached) => {
+                    tracing::info!(
+                        "loaded cached manifest: {} albums, updated {}",
+                        cached.albums.len(),
+                        cached.updated.to_rfc3339()
+                    );
+                    cached
+                }
+                None => {
+                    tracing::info!("no cached manifest found, scanning...");
+                    let manifest = walk::scan(&config.photos_path, &config.exclude_regex)
+                        .context("initial scan failed")?;
+                    if let Err(error) = manifest.save(&manifest_path) {
+                        tracing::warn!("failed to save initial manifest: {error}");
+                    }
+                    tracing::info!("initial scan complete: {} albums", manifest.albums.len());
+                    manifest
+                }
+            }));
+            crate::scanner::watcher::start(
+                config.photos_path.clone(),
+                config.data_path.clone(),
+                config.exclude_regex.clone(),
+                manifest.clone(),
+            );
+            pool.pregenerate_all(
+                config.photos_path.clone(),
+                config.data_path.clone(),
+                config.exclude_regex.clone(),
+            );
+            (Some(manifest), None)
+        }
+        AlbumMode::Timeline => {
+            let service = crate::timeline::TimelineService::open(config.clone())
+                .await
+                .context("initial timeline scan failed")?;
+            crate::scanner::watcher::start_timeline(config.photos_path.clone(), service.clone());
+            (None, Some(service))
+        }
+    };
 
     let state: SharedState = Arc::new(api::AppState {
         config: config.clone(),
         manifest,
+        timeline,
         exclude,
-        thumbnails: pool.clone(),
+        thumbnails: pool,
     });
-
-    // Start background thumbnail pre-generation.
-    pool.pregenerate_all(
-        config.photos_path.clone(),
-        config.data_path.clone(),
-        config.exclude_regex.clone(),
-    );
-
     let app = build_router(state);
-
     let addr = format!("{}:{}", config.bind_address, config.port);
-    tracing::info!("listening on {}", addr);
-
+    tracing::info!("listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
-
     Ok(())
 }
 
@@ -92,6 +95,9 @@ fn build_router(state: SharedState) -> Router {
         .route("/api/albums", get(api::list_albums))
         .route("/api/albums/{name}", get(api::get_album))
         .route("/api/rescan", get(api::rescan).post(api::rescan))
+        .route("/api/thumbs/by-id/{id}", get(api::serve_thumbnail_by_id))
+        .route("/api/exif/by-id/{id}", get(api::serve_exif_by_id))
+        .route("/api/photos/by-id/{id}", get(serve_photo_by_id))
         // Thumbnails & EXIF
         .route("/api/thumbs/{*path}", get(api::serve_thumbnail))
         .route("/api/exif/{*path}", get(api::serve_exif))
@@ -143,6 +149,31 @@ async fn serve_photo(
         .and_then(|_| canonical.file_name())
         .and_then(|name| name.to_str());
     serve_file_with_range(&canonical, &headers, download_name).await
+}
+
+async fn serve_photo_by_id(
+    State(state): State<SharedState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+    Query(query): Query<PhotoQuery>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    let service = state.timeline.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let photo = service
+        .db()
+        .get_photo(&photo_id)
+        .map_err(|error| {
+            tracing::error!("timeline photo lookup failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let path = api::resolve_timeline_photo_path(service, &photo.relative_path)?;
+    let download_name = query
+        .download
+        .as_deref()
+        .filter(|value| *value == "1" || value.eq_ignore_ascii_case("true"))
+        .and_then(|_| path.file_name())
+        .and_then(|name| name.to_str());
+    serve_file_with_range(&path, &headers, download_name).await
 }
 
 async fn serve_file_with_range(
@@ -383,13 +414,445 @@ mod tests {
 
         Arc::new(api::AppState {
             config,
-            manifest: Arc::new(RwLock::new(Manifest {
+            manifest: Some(Arc::new(RwLock::new(Manifest {
                 updated: chrono::Utc::now(),
                 albums: Vec::new(),
-            })),
+            }))),
+            timeline: None,
             exclude: Regex::new(r"$^").expect("test regex"),
             thumbnails,
         })
+    }
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "lumiflow-server-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn write(&self, relative_path: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let path = self.0.join(relative_path);
+            std::fs::create_dir_all(path.parent().expect("file parent"))
+                .expect("create file parent");
+            std::fs::write(&path, bytes).expect("write test file");
+            path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn timeline_config(photos: &std::path::Path, data: &std::path::Path) -> Config {
+        let mut config = router_test_state().config.clone();
+        config.album_mode = crate::config::AlbumMode::Timeline;
+        config.photos_path = photos.to_path_buf();
+        config.data_path = data.to_path_buf();
+        config.timeline_timezone = "UTC".into();
+        config
+    }
+
+    fn insert_timeline_photo(
+        db: &crate::timeline::db::TimelineDb,
+        id: &str,
+        relative_path: &str,
+        fingerprint: &str,
+        exif: serde_json::Value,
+    ) {
+        use crate::timeline::models::{PhotoAnalysis, PhotoCandidate, TimeSource};
+
+        db.upsert_candidate(&PhotoCandidate {
+            id: id.into(),
+            relative_path: relative_path.into(),
+            filename: std::path::Path::new(relative_path)
+                .file_name()
+                .expect("filename")
+                .to_string_lossy()
+                .into_owned(),
+            extension: "png".into(),
+            size_bytes: 12,
+            mtime_ns: 1,
+            fingerprint: fingerprint.into(),
+            scan_id: "test-scan".into(),
+        })
+        .expect("insert candidate");
+        db.save_analysis(&PhotoAnalysis {
+            id: id.into(),
+            taken_at: Some("2024-02-10T09:00:00+00:00".into()),
+            time_source: TimeSource::Exif,
+            timezone: Some("+00:00".into()),
+            gps_lat: None,
+            gps_lon: None,
+            width: 2,
+            height: 2,
+            camera_make: None,
+            camera_model: None,
+            lens: None,
+            exif_json: exif,
+        })
+        .expect("save analysis");
+    }
+
+    fn timeline_test_state(config: Config, db: crate::timeline::db::TimelineDb) -> SharedState {
+        let service = Arc::new(
+            crate::timeline::TimelineService::from_db_for_test(config.clone(), db)
+                .expect("timeline service"),
+        );
+        Arc::new(api::AppState {
+            config: config.clone(),
+            manifest: None,
+            timeline: Some(service),
+            exclude: Regex::new(r"$^").expect("test regex"),
+            thumbnails: ThumbnailPool::new(&config),
+        })
+    }
+
+    async fn response_bytes(response: Response) -> Vec<u8> {
+        use axum::body::HttpBody;
+
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            let frame = frame.expect("body frame");
+            if let Ok(data) = frame.into_data() {
+                bytes.extend_from_slice(&data);
+            }
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn folder_mode_keeps_manifest_album_detail_and_rescan_behavior() {
+        let photos = TestDir::new("folder-mode-photos");
+        let data = TestDir::new("folder-mode-data");
+        photos.write("album/a.jpg", b"photo");
+        let mut config = router_test_state().config.clone();
+        config.photos_path = photos.path().to_path_buf();
+        config.data_path = data.path().to_path_buf();
+        let manifest = walk::scan(&config.photos_path, &config.exclude_regex).expect("manifest");
+        let state = Arc::new(api::AppState {
+            config: config.clone(),
+            manifest: Some(Arc::new(RwLock::new(manifest))),
+            timeline: None,
+            exclude: Regex::new(&config.exclude_regex).expect("exclude"),
+            thumbnails: ThumbnailPool::new(&config),
+        });
+
+        let list = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let list_json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(list).await).expect("list json");
+        assert_eq!(list_json["albums"][0]["name"], "album");
+        assert_eq!(list_json["albums"][0]["count"], 1);
+
+        let detail = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums/album")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let detail_json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(detail).await).expect("detail json");
+        assert_eq!(detail_json["photos"][0]["id"], 0);
+        assert_eq!(detail_json["photos"][0]["name"], "a.jpg");
+
+        let rescan = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/rescan")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let rescan_json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(rescan).await).expect("rescan json");
+        assert_eq!(rescan_json["status"], "ok");
+        assert_eq!(rescan_json["albums_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn timeline_mode_lists_sqlite_albums_and_detail() {
+        use crate::timeline::models::{DailyAlbumBuild, TimelineAlbum};
+
+        let photos = TestDir::new("timeline-albums-photos");
+        let data = TestDir::new("timeline-albums-data");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        insert_timeline_photo(&db, "p1", "nested/a.png", "fp-a", serde_json::json!({}));
+        db.replace_daily_albums(&[DailyAlbumBuild {
+            album: TimelineAlbum {
+                id: "auto-day:2024-02-10".into(),
+                name: "2024-02-10".into(),
+                description: None,
+                date_start: chrono::NaiveDate::from_ymd_opt(2024, 2, 10),
+                date_end: chrono::NaiveDate::from_ymd_opt(2024, 2, 10),
+                place: None,
+                holiday: None,
+                photo_count: 1,
+                cover_photo_id: Some("p1".into()),
+            },
+            photo_ids: vec!["p1".into()],
+        }])
+        .expect("album");
+        let state = timeline_test_state(config, db);
+
+        let list = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(list).await).expect("list json");
+        assert_eq!(list_json["albums"][0]["id"], "auto-day:2024-02-10");
+
+        let detail = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/albums/auto-day%3A2024-02-10")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail_json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(detail).await).expect("detail json");
+        assert_eq!(detail_json["photos"][0]["id"], "p1");
+    }
+
+    #[tokio::test]
+    async fn timeline_rescan_returns_scan_and_album_counts() {
+        let photos = TestDir::new("timeline-rescan-photos");
+        let data = TestDir::new("timeline-rescan-data");
+        let image_path = photos.path().join("nested/a.png");
+        std::fs::create_dir_all(image_path.parent().expect("image parent")).expect("parent");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&image_path)
+            .expect("write image");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        let state = timeline_test_state(config, db);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/rescan")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(response).await).expect("rescan json");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["found"], 1);
+        assert_eq!(json["analyzed"], 1);
+        assert_eq!(json["albums_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn by_id_original_serves_nested_file_range_download_and_unknown_id() {
+        let photos = TestDir::new("by-id-original-photos");
+        let data = TestDir::new("by-id-original-data");
+        photos.write("nested/a.png", b"0123456789");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        insert_timeline_photo(&db, "p1", "nested/a.png", "fp-a", serde_json::json!({}));
+        let state = timeline_test_state(config, db);
+
+        let full = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/by-id/p1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(response_bytes(full).await, b"0123456789");
+
+        let ranged = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/by-id/p1")
+                    .header(header::RANGE, "bytes=2-5")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response_bytes(ranged).await, b"2345");
+
+        let download = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/by-id/p1?download=1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(download.status(), StatusCode::OK);
+        assert!(download.headers().contains_key(header::CONTENT_DISPOSITION));
+
+        let missing = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/by-id/missing")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn by_id_original_rejects_database_path_that_escapes_photo_root() {
+        use std::os::unix::fs::symlink;
+
+        let photos = TestDir::new("by-id-escape-photos");
+        let outside = TestDir::new("by-id-escape-outside");
+        let data = TestDir::new("by-id-escape-data");
+        outside.write("secret.png", b"secret");
+        symlink(outside.path(), photos.path().join("linked")).expect("symlink");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        insert_timeline_photo(
+            &db,
+            "escape",
+            "linked/secret.png",
+            "fp-secret",
+            serde_json::json!({}),
+        );
+
+        let response = build_router(timeline_test_state(config, db))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/by-id/escape")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn by_id_thumbnail_generates_webp_and_persists_source_fingerprint() {
+        let photos = TestDir::new("by-id-thumb-photos");
+        let data = TestDir::new("by-id-thumb-data");
+        let image_path = photos.path().join("nested/a.png");
+        std::fs::create_dir_all(image_path.parent().expect("image parent")).expect("parent");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 50, 20, 255]))
+            .save(&image_path)
+            .expect("write image");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        insert_timeline_photo(&db, "p1", "nested/a.png", "exact-fp", serde_json::json!({}));
+
+        let response = build_router(timeline_test_state(config, db))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/thumbs/by-id/p1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            HeaderValue::from_static("image/webp")
+        );
+        let bytes = response_bytes(response).await;
+        assert!(image::load_from_memory_with_format(&bytes, image::ImageFormat::WebP).is_ok());
+        assert!(crate::thumbnail::timeline_thumb_is_fresh(
+            data.path(),
+            "p1",
+            "exact-fp"
+        ));
+    }
+
+    #[tokio::test]
+    async fn by_id_exif_returns_stored_json_after_original_is_removed() {
+        let photos = TestDir::new("by-id-exif-photos");
+        let data = TestDir::new("by-id-exif-data");
+        let original = photos.write("nested/a.png", b"not-image");
+        let config = timeline_config(photos.path(), data.path());
+        let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
+            .expect("timeline db");
+        insert_timeline_photo(
+            &db,
+            "p1",
+            "nested/a.png",
+            "fp-a",
+            serde_json::json!({"iso": 640, "camera": "stored"}),
+        );
+        std::fs::remove_file(original).expect("remove original");
+
+        let response = build_router(timeline_test_state(config, db))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/exif/by-id/p1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(response).await).expect("exif json");
+        assert_eq!(json, serde_json::json!({"iso": 640, "camera": "stored"}));
     }
 
     #[tokio::test]

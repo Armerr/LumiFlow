@@ -28,10 +28,7 @@ export async function createGridPage({ name }: GridPageParams): Promise<Page> {
       container.innerHTML = `
         <button class="back-btn" id="grid-back">← 返回</button>
         <div class="grid-page">
-          <div class="grid-header">
-            <h2>${escapeHtml(album.name)}</h2>
-            <span class="photo-count">${album.photos.length} 张照片</span>
-          </div>
+          ${renderGridHeader(album, album.photos.length)}
           <div class="js-grid"></div>
         </div>
       `
@@ -51,6 +48,18 @@ export async function createGridPage({ name }: GridPageParams): Promise<Page> {
       scene?.dispose()
     },
   }
+}
+
+export function renderGridHeader(album: Pick<AlbumDetail, 'name' | 'description'>, photoCount: number): string {
+  const description = album.description
+    ? `<p class="album-description">${escapeHtml(album.description)}</p>`
+    : ''
+
+  return `<div class="grid-header">
+    <h2>${escapeHtml(album.name)}</h2>
+    ${description}
+    <span class="photo-count">${photoCount} 张照片</span>
+  </div>`
 }
 
 function escapeHtml(s: string): string { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }

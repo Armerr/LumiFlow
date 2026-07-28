@@ -5,6 +5,10 @@ import type { Album } from '../shared/types'
 import { FanScene } from './fan/FanScene'
 import './fan.scss'
 
+export function albumNavigationIdentity(album: Album): string {
+  return album.id ?? album.name
+}
+
 export async function createFanPage(): Promise<Page> {
   let scene: FanScene | null = null
 
@@ -27,7 +31,7 @@ export async function createFanPage(): Promise<Page> {
       container.innerHTML = ''
       scene = new FanScene(container)
       scene.onAlbumClick = (album: Album) => {
-        router.navigate({ page: 'album', name: album.name })
+        router.navigate({ page: 'album', name: albumNavigationIdentity(album) })
       }
       scene.setAlbums(data.albums)
     },

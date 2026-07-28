@@ -104,7 +104,7 @@ class Plane extends THREE.Object3D {
   }
   loadTexture(album: string, photo: Photo) {
     this.photo = photo
-    loader.load(api.thumbUrl(album, photo.name), (texture) => {
+    loader.load(api.thumbUrl(album, photo), (texture) => {
       texture.minFilter = THREE.LinearFilter
       texture.generateMipmaps = false
       texture.colorSpace = THREE.SRGBColorSpace

@@ -453,6 +453,21 @@ impl TimelineDb {
         })
     }
 
+    pub fn get_photo_exif(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        self.with_connection(|connection| {
+            let raw = connection
+                .query_row(
+                    "SELECT exif_json FROM photos
+                     WHERE id = ?1 AND status = 'active' AND exif_json IS NOT NULL",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            raw.map(|json| serde_json::from_str(&json).context("invalid stored EXIF JSON"))
+                .transpose()
+        })
+    }
+
     pub fn save_vision_tags(&self, tags: &VisionTags) -> Result<()> {
         let labels = serde_json::to_string(&tags.labels)?;
         let scores = serde_json::to_string(&tags.scores)?;

@@ -107,6 +107,53 @@ pub fn start(
     }
 }
 
+/// Start timeline-mode periodic and recursive notify rescans.
+pub fn start_timeline(photos_path: PathBuf, service: Arc<crate::timeline::TimelineService>) {
+    let periodic_service = service.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = periodic_service.rescan().await {
+                tracing::error!("periodic timeline rescan failed: {error:#}");
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watcher =
+            match notify::recommended_watcher(move |result: Result<Event, notify::Error>| {
+                if let Ok(event) = result {
+                    let _ = tx.send(event);
+                }
+            }) {
+                Ok(watcher) => watcher,
+                Err(error) => {
+                    tracing::warn!("timeline filesystem watcher unavailable: {error}");
+                    return;
+                }
+            };
+        if let Err(error) = watcher.watch(&photos_path, RecursiveMode::Recursive) {
+            tracing::warn!("cannot watch timeline root {photos_path:?}: {error}");
+            return;
+        }
+        tracing::info!("timeline filesystem watcher active on {photos_path:?}");
+
+        while let Some(event) = rx.recv().await {
+            if !is_relevant_change(&event) {
+                continue;
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::timeout_at(deadline, rx.recv()).await.is_ok() {}
+            if let Err(error) = service.rescan().await {
+                tracing::error!("timeline watcher rescan failed: {error:#}");
+            }
+        }
+    });
+}
+
 fn is_relevant_change(event: &Event) -> bool {
     match &event.kind {
         EventKind::Create(CreateKind::File | CreateKind::Folder) => true,

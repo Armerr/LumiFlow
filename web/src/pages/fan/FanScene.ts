@@ -131,7 +131,7 @@ export class FanScene {
       const label = document.createElement('button')
       label.className = 'fan-card-hit'
       label.type = 'button'
-      label.innerHTML = `<span>${escapeHtml(albums[i].name)}</span><small>${albums[i].count} 张照片</small>`
+      label.innerHTML = `<span>${escapeHtml(albums[i].name)}</span>${albums[i].description ? `<small>${escapeHtml(albums[i].description)}</small>` : ''}<small>${albumPhotoCount(albums[i])} 张照片</small>`
       label.addEventListener('click', () => {
         if (!this.didDrag) this.onAlbumClick?.(albums[i])
       })
@@ -221,18 +221,19 @@ export class FanScene {
       return
     }
 
-    const stats = getFanPosterStats(this.cards.map((item) => item.album.count))
+    const stats = getFanPosterStats(this.cards.map((item) => albumPhotoCount(item.album)))
     this.posterChrome.innerHTML = `
       <div class="fan-poster-top">
         <div>
           <div class="fan-poster-kicker">LumiFlow Albums</div>
           <div class="fan-poster-title">${escapeHtml(card.album.name)}</div>
+          ${card.album.description ? `<div class="fan-poster-description">${escapeHtml(card.album.description)}</div>` : ''}
         </div>
         <div class="fan-poster-stats"><span>${stats.albumCount}</span> albums<br><span>${stats.photoCount}</span> photos</div>
       </div>
       <div class="fan-poster-bottom-caption">${active + 1} / ${this.cards.length} · 左右滑动浏览 · 点击照片进入</div>
       <div class="fan-film-rail" aria-label="相册缩略图">
-        ${this.cards.map((item, i) => `<button class="fan-film-frame ${i === active ? 'is-active' : ''}" type="button" aria-label="切换到 ${escapeAttr(item.album.name)}"><img src="${api.thumbUrl(item.album.name, item.album.cover)}" alt=""><span>${i + 1}</span></button>`).join('')}
+        ${this.cards.map((item, i) => `<button class="fan-film-frame ${i === active ? 'is-active' : ''}" type="button" aria-label="切换到 ${escapeAttr(item.album.name)}"><img src="${albumCoverThumbUrl(item.album)}" alt=""><span>${i + 1}</span></button>`).join('')}
       </div>
     `
 
@@ -300,7 +301,7 @@ class Card {
     // Async load real texture
     const loader = new THREE.TextureLoader()
     loader.load(
-      api.thumbUrl(album.name, album.cover),
+      albumCoverThumbUrl(album),
       (tex: THREE.Texture) => {
         tex.minFilter = THREE.LinearFilter
         tex.generateMipmaps = false
@@ -376,6 +377,18 @@ class Card {
     this.program.dispose()
     this.mesh.geometry.dispose()
   }
+}
+
+function albumPhotoCount(album: Album): number {
+  return album.photo_count ?? album.count ?? 0
+}
+
+function albumCoverThumbUrl(album: Album): string {
+  if (album.cover_photo_id) {
+    return api.thumbUrl(album.id ?? album.name, { id: album.cover_photo_id, name: album.cover_photo_id })
+  }
+
+  return api.thumbUrl(album.name, { id: 0, name: album.cover ?? '' })
 }
 
 function escapeHtml(s: string): string {

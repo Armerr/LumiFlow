@@ -43,7 +43,7 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
 
   if (photo) {
     try {
-      exif = await api.exif(album, photo.name)
+      exif = await api.exif(album, photo)
     } catch {
       // EXIF may not be available
     }
@@ -82,7 +82,7 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
           <div class="detail-main">
             <div class="detail-photo">
               <img
-                src="${api.photoUrl(album, photo.name)}"
+                src="${api.photoUrl(album, photo)}"
                 alt="${escapeHtml(photo.name)}"
                 loading="eager"
               />
@@ -183,11 +183,11 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
   }
 }
 
-export function renderOriginalDownloadLink(album: string, photo: PhotoInfo): string {
-  return `<a class="original-download-link" href="${api.photoUrl(album, photo.name)}?download=1" download="${escapeAttr(photo.name)}" aria-label="下载原图 ${escapeAttr(photo.name)}">下载原图</a>`
+export function renderOriginalDownloadLink(albumId: string, photo: PhotoInfo): string {
+  return `<a class="original-download-link" href="${api.photoUrl(albumId, photo)}?download=1" download="${escapeAttr(photo.name)}" aria-label="下载原图 ${escapeAttr(photo.name)}">下载原图</a>`
 }
 
-type PhotoInfo = Pick<Photo, 'name' | 'width' | 'height' | 'size_bytes' | 'format'>
+type PhotoInfo = Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'size_bytes' | 'format'>
 type InfoRow = [string, string | undefined | null]
 
 export function renderPhotoInfo(exif: ExifData | null, photo: PhotoInfo): string {

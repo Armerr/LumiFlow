@@ -2,10 +2,18 @@
 
 export interface Album {
   name: string
-  cover: string
-  count: number
-  created_at: string
-  updated_at: string
+  id?: string
+  description?: string | null
+  date_start?: string | null
+  date_end?: string | null
+  place?: string | null
+  holiday?: string | null
+  cover_photo_id?: string | null
+  photo_count?: number
+  cover?: string
+  count?: number
+  created_at?: string
+  updated_at?: string
 }
 
 export interface AlbumsResponse {
@@ -14,16 +22,27 @@ export interface AlbumsResponse {
 }
 
 export interface Photo {
-  id: number
+  id: number | string
   name: string
   width: number
   height: number
   size_bytes: number
   format: string
+  relative_path?: string
+  taken_at?: string | null
+  time_source?: string
 }
 
 export interface AlbumDetail {
   name: string
+  id?: string
+  description?: string | null
+  date_start?: string | null
+  date_end?: string | null
+  place?: string | null
+  holiday?: string | null
+  cover_photo_id?: string | null
+  photo_count?: number
   photos: Photo[]
 }
 
