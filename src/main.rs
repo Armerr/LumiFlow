@@ -5,6 +5,7 @@ mod exif;
 mod scanner;
 mod server;
 mod thumbnail;
+mod timeline;
 
 use tracing_subscriber::EnvFilter;
 
