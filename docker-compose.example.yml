@@ -1,0 +1,18 @@
+services:
+  lumiflow:
+    image: armerr/lumiflow:latest
+    container_name: lumiflow
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:4320:4320"
+    volumes:
+      - /volume1/photos/gallery:/photos:ro
+      - ./lumiflow-data:/data
+    environment:
+      LUMIFLOW_PHOTOS_PATH: /photos
+      LUMIFLOW_DATA_PATH: /data
+      LUMIFLOW_BIND_ADDRESS: 0.0.0.0
+      LUMIFLOW_PORT: 4320
+      LUMIFLOW_BUILDER_WORKERS: "2"
+      RUST_LOG: lumiflow=info,tower_http=warn

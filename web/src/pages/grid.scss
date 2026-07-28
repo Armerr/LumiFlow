@@ -1,0 +1,93 @@
+.grid-page {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(116, 139, 158, 0.16), transparent 30rem),
+    radial-gradient(circle at 82% 78%, rgba(42, 54, 66, 0.48), transparent 34rem),
+    var(--color-bg);
+}
+
+.is-dragging .grid-page,
+.is-dragging .js-plane {
+  cursor: grabbing;
+}
+
+.grid-header {
+  position: fixed;
+  top: 24px;
+  left: 84px;
+  z-index: 3;
+  pointer-events: none;
+
+  h2 {
+    max-width: min(52vw, 720px);
+    margin: 0;
+    color: var(--color-text);
+    font-size: clamp(28px, 4.2vw, 72px);
+    font-weight: 500;
+    letter-spacing: -0.05em;
+    line-height: 0.92;
+    text-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+  }
+
+  .photo-count {
+    display: inline-block;
+    margin-top: 12px;
+    color: var(--color-accent);
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+}
+
+.js-grid {
+  --grid-cols: 5;
+  --grid-rows: 3;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  width: var(--grid-width, 160%);
+  height: var(--grid-height, 95%);
+  display: grid;
+  grid-template-columns: repeat(var(--grid-cols), 1fr);
+  grid-template-rows: repeat(var(--grid-rows), 1fr);
+}
+
+.js-grid > div {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.js-plane {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: block;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.grid-webgl-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.error-state,
+.empty-state {
+  text-align: center;
+  padding: 80px 24px;
+
+  p { font-size: 18px; color: var(--color-text-dim); }
+}

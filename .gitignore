@@ -1,0 +1,54 @@
+# 依赖目录
+node_modules/
+web/node_modules/
+.pnpm-store/
+
+# 前端构建产物
+dist/
+dist-ssr/
+web/dist/
+*.tsbuildinfo
+
+# Rust 构建产物
+/target/
+
+# LumiFlow 本地运行数据
+.env
+.env.*
+config.json
+builder.config.ts
+/lumiflow-data/
+/.lumiflow-data/
+/.lumiflow-demo/
+/data/
+
+# 本地 Docker Compose 覆盖文件
+docker-compose.yml
+docker-compose.override.yml
+compose.yml
+compose.override.yml
+
+# 系统、编辑器、日志和临时文件
+.DS_Store
+.vscode/
+.claude/
+.vercel/
+*.local
+*.log
+*.tmp
+*.bak
+
+# 历史/实验产物
+public/og-image-*.png
+test-svg-font-rendering.png
+test-traditional-font-rendering.png
+thomas-x2d-xcd-25v-1.jpg
+thomas-x2d-xcd-25v-1.webp
+cluster-report.html
+cluster-report.json
+apps/web/assets-git
+apps/web/src/data/photos-manifest.json
+apps/web/src/data/.cache/
+apps/web/public/thumbnails
+apps/web/public/photos
+apps/web/public/originals
