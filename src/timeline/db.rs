@@ -300,8 +300,15 @@ impl TimelineDb {
     pub fn replace_daily_albums(&self, albums: &[DailyAlbumBuild]) -> Result<()> {
         self.with_transaction(|transaction| {
             transaction.execute(
-                "DELETE FROM albums WHERE type IN ('auto_day', 'unknown_date')",
-                [],
+                "DELETE FROM albums
+                 WHERE type IN ('auto_day', 'unknown_date')
+                   AND id NOT IN (SELECT value FROM json_each(?1))",
+                [serde_json::to_string(
+                    &albums
+                        .iter()
+                        .map(|build| build.album.id.as_str())
+                        .collect::<Vec<_>>(),
+                )?],
             )?;
 
             for build in albums {
@@ -324,7 +331,17 @@ impl TimelineDb {
                     "INSERT INTO albums (
                         id, type, date_start, date_end, display_name, place_name,
                         holiday_name, photo_count, cover_photo_id
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        type = excluded.type,
+                        date_start = excluded.date_start,
+                        date_end = excluded.date_end,
+                        display_name = excluded.display_name,
+                        place_name = excluded.place_name,
+                        holiday_name = excluded.holiday_name,
+                        photo_count = excluded.photo_count,
+                        cover_photo_id = excluded.cover_photo_id,
+                        updated_at = CURRENT_TIMESTAMP",
                     params![
                         build.album.id,
                         album_type,
@@ -336,6 +353,10 @@ impl TimelineDb {
                         photo_count,
                         build.album.cover_photo_id,
                     ],
+                )?;
+                transaction.execute(
+                    "DELETE FROM album_photos WHERE album_id = ?1",
+                    [&build.album.id],
                 )?;
 
                 for (sort_order, photo_id) in build.photo_ids.iter().enumerate() {
@@ -358,7 +379,7 @@ impl TimelineDb {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, relative_path, filename, width, height, size_bytes,
-                        extension, taken_at, time_source, fingerprint
+                        extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
                  FROM photos
                  WHERE status = 'active'
                  ORDER BY taken_at IS NULL, taken_at, relative_path, id",
@@ -405,7 +426,7 @@ impl TimelineDb {
 
             let mut statement = connection.prepare(
                 "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
-                        p.extension, p.taken_at, p.time_source, p.fingerprint
+                        p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
                  FROM album_photos ap
                  JOIN photos p ON p.id = ap.photo_id
                  WHERE ap.album_id = ?1 AND p.status = 'active'
@@ -423,7 +444,7 @@ impl TimelineDb {
             Ok(connection
                 .query_row(
                     "SELECT id, relative_path, filename, width, height, size_bytes,
-                            extension, taken_at, time_source, fingerprint
+                            extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
                      FROM photos WHERE id = ?1 AND status = 'active'",
                     [id],
                     map_photo,
@@ -571,6 +592,63 @@ impl TimelineDb {
         })
     }
 
+    pub fn save_place(&self, place: &crate::timeline::places::Place) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO places (
+                    geo_bucket, lat, lon, country, region, city, district, provider, resolved_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(geo_bucket) DO UPDATE SET
+                    lat = excluded.lat,
+                    lon = excluded.lon,
+                    country = excluded.country,
+                    region = excluded.region,
+                    city = excluded.city,
+                    district = excluded.district,
+                    provider = excluded.provider,
+                    resolved_at = excluded.resolved_at",
+                params![
+                    place.geo_bucket,
+                    place.lat,
+                    place.lon,
+                    place.country,
+                    place.region,
+                    place.city,
+                    place.district,
+                    place.provider,
+                    place.resolved_at,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn get_place(&self, geo_bucket: &str) -> Result<Option<crate::timeline::places::Place>> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT geo_bucket, lat, lon, country, region, city, district,
+                            provider, resolved_at
+                     FROM places WHERE geo_bucket = ?1",
+                    [geo_bucket],
+                    |row| {
+                        Ok(crate::timeline::places::Place {
+                            geo_bucket: row.get(0)?,
+                            lat: row.get(1)?,
+                            lon: row.get(2)?,
+                            country: row.get(3)?,
+                            region: row.get(4)?,
+                            city: row.get(5)?,
+                            district: row.get(6)?,
+                            provider: row.get(7)?,
+                            resolved_at: row.get(8)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
     #[cfg(test)]
     fn has_table(&self, table: &str) -> Result<bool> {
         self.with_connection(|connection| {
@@ -637,6 +715,8 @@ fn map_photo(row: &Row<'_>) -> rusqlite::Result<TimelinePhoto> {
         taken_at: row.get(7)?,
         time_source: TimeSource::from_db(&time_source)?,
         fingerprint: row.get(9)?,
+        gps_lat: row.get(10)?,
+        gps_lon: row.get(11)?,
     })
 }
 
@@ -1016,5 +1096,97 @@ mod tests {
             db.list_albums().expect("albums")[0].description.as_deref(),
             Some("A family meal.")
         );
+    }
+    #[test]
+    fn daily_album_replacement_preserves_surviving_ai_and_removes_stale_ai() {
+        let db = TimelineDb::open_in_memory().expect("db");
+        analyzed_candidate(
+            &db,
+            "photo",
+            "fp-photo",
+            "scan-1",
+            "2024-02-10T09:00:00+08:00",
+        );
+        analyzed_candidate(
+            &db,
+            "stale-photo",
+            "fp-stale",
+            "scan-1",
+            "2024-02-11T09:00:00+08:00",
+        );
+        let surviving_id = "auto-day:2024-02-10";
+        let stale_id = "auto-day:2024-02-11";
+        db.replace_daily_albums(&[
+            album(
+                surviving_id,
+                NaiveDate::from_ymd_opt(2024, 2, 10).unwrap(),
+                &["photo"],
+            ),
+            album(
+                stale_id,
+                NaiveDate::from_ymd_opt(2024, 2, 11).unwrap(),
+                &["stale-photo"],
+            ),
+        ])
+        .expect("initial albums");
+
+        for album_id in [surviving_id, stale_id] {
+            db.save_ai_description(&AlbumAiDescription {
+                album_id: album_id.into(),
+                input_fingerprint: format!("fp-{album_id}"),
+                model: "model".into(),
+                description: format!("description-{album_id}"),
+                keywords: vec![],
+                confidence: 1.0,
+                generated_at: "2024-02-12T00:00:00Z".into(),
+                error: None,
+            })
+            .expect("save description");
+        }
+
+        let mut rebuilt = album(
+            surviving_id,
+            NaiveDate::from_ymd_opt(2024, 2, 10).unwrap(),
+            &["photo"],
+        );
+        rebuilt.album.name = "2024-02-10 上海".into();
+        db.replace_daily_albums(&[rebuilt])
+            .expect("replacement albums");
+
+        assert_eq!(
+            db.get_ai_description(surviving_id)
+                .expect("surviving description")
+                .expect("description retained")
+                .description,
+            format!("description-{surviving_id}")
+        );
+        assert_eq!(
+            db.get_ai_description(stale_id)
+                .expect("stale description lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn places_round_trip_by_geo_bucket() {
+        let db = TimelineDb::open_in_memory().expect("db");
+        let place = crate::timeline::places::Place {
+            geo_bucket: "31.230,121.474".into(),
+            lat: 31.2304,
+            lon: 121.4737,
+            country: Some("中国".into()),
+            region: Some("上海市".into()),
+            city: Some("上海".into()),
+            district: Some("黄浦区".into()),
+            provider: "nominatim".into(),
+            resolved_at: "2024-02-10T12:00:00Z".into(),
+        };
+
+        db.save_place(&place).expect("save place");
+        assert_eq!(
+            db.get_place("31.230,121.474").expect("get place"),
+            Some(place)
+        );
+        assert_eq!(db.get_place("0.000,0.000").expect("cache miss"), None);
     }
 }

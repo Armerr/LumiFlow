@@ -18,7 +18,9 @@ pub fn holiday_for(date: NaiveDate) -> Option<&'static str> {
                 (1, 1) => return Some("春节"),
                 (1, 15) => return Some("元宵"),
                 (5, 5) => return Some("端午"),
+                (7, 7) => return Some("七夕"),
                 (8, 15) => return Some("中秋"),
+                (9, 9) => return Some("重阳"),
                 _ => {}
             }
         }
@@ -60,6 +62,16 @@ mod tests {
     #[test]
     fn names_mid_autumn_festival() {
         assert_eq!(holiday_for(date(2024, 9, 17)), Some("中秋"));
+    }
+
+    #[test]
+    fn names_qixi_festival() {
+        assert_eq!(holiday_for(date(2024, 8, 10)), Some("七夕"));
+    }
+
+    #[test]
+    fn names_double_ninth_festival() {
+        assert_eq!(holiday_for(date(2024, 10, 11)), Some("重阳"));
     }
 
     #[test]

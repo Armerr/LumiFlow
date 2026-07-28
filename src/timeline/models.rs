@@ -75,6 +75,8 @@ pub struct TimelinePhoto {
     pub taken_at: Option<String>,
     pub time_source: TimeSource,
     pub fingerprint: String,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -123,3 +123,77 @@ fn thumb_is_fresh(thumb_path: &Path, source: &Path) -> bool {
         _ => false,
     }
 }
+
+/// Construct the filesystem path for a timeline thumbnail keyed by stable photo ID.
+pub fn timeline_thumb_path(data_path: &Path, photo_id: &str) -> PathBuf {
+    data_path
+        .join("thumbs")
+        .join("by-id")
+        .join(format!("{photo_id}.webp"))
+}
+
+/// Return whether a by-ID timeline thumbnail exists for the exact source fingerprint.
+pub fn timeline_thumb_is_fresh(data_path: &Path, photo_id: &str, fingerprint: &str) -> bool {
+    timeline_thumb_path(data_path, photo_id).is_file()
+        && timeline_thumb_fingerprint_path(data_path, photo_id).is_file()
+        && std::fs::read_to_string(timeline_thumb_fingerprint_path(data_path, photo_id))
+            .is_ok_and(|cached| cached == fingerprint)
+}
+
+/// Persist the source fingerprint alongside a generated timeline thumbnail.
+pub fn write_timeline_thumb_fingerprint(
+    data_path: &Path,
+    photo_id: &str,
+    fingerprint: &str,
+) -> std::io::Result<()> {
+    let path = timeline_thumb_fingerprint_path(data_path, photo_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, fingerprint)
+}
+
+fn timeline_thumb_fingerprint_path(data_path: &Path, photo_id: &str) -> PathBuf {
+    data_path
+        .join("thumbs")
+        .join("by-id")
+        .join(format!("{photo_id}.fingerprint"))
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn timeline_thumbnail_path_is_keyed_only_by_photo_id() {
+        let data = Path::new("data");
+        assert_eq!(
+            timeline_thumb_path(data, "0123456789abcdef"),
+            data.join("thumbs/by-id/0123456789abcdef.webp")
+        );
+    }
+
+    #[test]
+    fn timeline_thumbnail_freshness_uses_exact_fingerprint_metadata() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let data = std::env::temp_dir().join(format!(
+            "lumiflow-timeline-thumb-{}-{nonce}",
+            std::process::id()
+        ));
+        let thumbnail = timeline_thumb_path(&data, "photo-id");
+        std::fs::create_dir_all(thumbnail.parent().expect("thumbnail parent"))
+            .expect("create cache");
+        std::fs::write(&thumbnail, b"webp").expect("write thumbnail");
+
+        assert!(!timeline_thumb_is_fresh(&data, "photo-id", "fp-1"));
+        write_timeline_thumb_fingerprint(&data, "photo-id", "fp-1").expect("write fingerprint");
+        assert!(timeline_thumb_is_fresh(&data, "photo-id", "fp-1"));
+        assert!(!timeline_thumb_is_fresh(&data, "photo-id", "fp-2"));
+
+        let _ = std::fs::remove_dir_all(data);
+    }
+}
