@@ -363,6 +363,21 @@ mod tests {
             port: 4320,
             builder_workers: 1,
             exclude_regex: r"$^".into(),
+            album_mode: crate::config::AlbumMode::Folders,
+            timeline_timezone: "Asia/Shanghai".into(),
+            calendar_region: "CN_COMMON".into(),
+            place_provider: None,
+            vision_tagger: crate::config::VisionTagger::None,
+            vision_model_path: None,
+            vision_labels_path: None,
+            vision_workers: 1,
+            ai: crate::config::AiConfig {
+                enabled: false,
+                base_url: None,
+                api_key: None,
+                model: None,
+                language: "zh-CN".into(),
+            },
         };
         let thumbnails = ThumbnailPool::new(&config);
 
