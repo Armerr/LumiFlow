@@ -1,24 +1,40 @@
-import { describe, expect, test } from 'vitest'
-import { getSwipeTargetId, renderOriginalDownloadLink, renderPhotoInfo, shouldBlockNativeDetailNavigation } from './detail'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { createDetailPage, renderDetailPreview, renderOriginalDownloadLink, renderPhotoInfo } from './detail'
 
-describe('detail swipe navigation', () => {
-  test('uses a low horizontal threshold for phone swipes', () => {
-    expect(getSwipeTargetId({ startX: 320, endX: 250, startY: 420, endY: 426 }, 2, 6)).toBe(3)
-    expect(getSwipeTargetId({ startX: 160, endX: 232, startY: 420, endY: 416 }, 2, 6)).toBe(1)
-    expect(getSwipeTargetId({ startX: 320, endX: 286, startY: 420, endY: 421 }, 2, 6)).toBeNull()
-    expect(getSwipeTargetId({ startX: 320, endX: 250, startY: 420, endY: 520 }, 2, 6)).toBeNull()
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+
+describe('detail data loading', () => {
+  test('fetches only the requested photo metadata instead of the full album', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ name: 'Trip', photo_count: 4750, photos: [{ id: 'p42', name: 'photo.jpg', width: 10, height: 10, size_bytes: 1, format: 'JPG' }] }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createDetailPage({ album: 'day:2025-01-02', photoId: 42 })
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/albums/day%3A2025-01-02?offset=42&limit=1')
   })
+})
 
-  test('does not navigate beyond detail bounds', () => {
-    expect(getSwipeTargetId({ startX: 320, endX: 250, startY: 420, endY: 426 }, 5, 6)).toBeNull()
-    expect(getSwipeTargetId({ startX: 160, endX: 232, startY: 420, endY: 416 }, 0, 6)).toBeNull()
-  })
+describe('detail preview', () => {
+  test('uses a browser-compatible WebP preview for unsupported originals', () => {
+    const html = renderDetailPreview('Trip', {
+      id: 'p42',
+      name: 'photo.HIF',
+      width: 10,
+      height: 10,
+      size_bytes: 1,
+      format: 'HIF',
+    })
 
-  test('blocks native browser edge navigation during detail swipes', () => {
-    expect(shouldBlockNativeDetailNavigation({ startX: 2, endX: 8, startY: 420, endY: 421 }, 390)).toBe(true)
-    expect(shouldBlockNativeDetailNavigation({ startX: 388, endX: 382, startY: 420, endY: 421 }, 390)).toBe(true)
-    expect(shouldBlockNativeDetailNavigation({ startX: 2, endX: 4, startY: 420, endY: 462 }, 390)).toBe(false)
-    expect(shouldBlockNativeDetailNavigation({ startX: 120, endX: 60, startY: 420, endY: 421 }, 390)).toBe(false)
+    expect(html).toContain('src="/api/thumbs/by-id/p42"')
+    expect(html).toContain('alt="photo.HIF"')
   })
 })
 

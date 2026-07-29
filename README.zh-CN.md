@@ -1,6 +1,6 @@
 # LumiFlow
 
-LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它既支持文件夹相册，也支持面向杂乱嵌套备份的可选 SQLite 时间线模式；程序生成缓存的 WebP 缩略图，并通过单个 Rust 二进制提供 WebGL 相册界面。原始照片目录始终只读。
+LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。默认会递归扫描挂载的照片库并全量索引到 SQLite，按需生成 WebP 缩略图，再通过单个 Rust 二进制提供 WebGL 相册首页与内存有界的纵向照片网格。原始照片目录始终只读。
 
 [English README](README.md)
 
@@ -12,11 +12,11 @@ LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它既支
 - 时间线相册：递归索引嵌套照片，先以一级文件夹为硬边界，再在各文件夹内按自然日稳定生成虚拟相册，不移动原图。
 - 可选本地 CPU 视觉标签，以及通过低分辨率 contact sheet 生成并缓存的相册描述。
 - WebGL 折扇式相册首页。
-- 可拖拽的无限照片网格相册页。
-- 照片详情页支持键盘、触摸和原图下载。
+- 原生纵向相册网格：元数据分页、缩略图懒加载、DOM 常驻数量有界，不支持左右拖动。
+- 照片详情页支持键盘控制、浏览器兼容的 WebP 预览和原图下载。
 - EXIF 元数据提取：相机、镜头、曝光、GPS、尺寸和文件信息。
 - 原图接口支持 Range 请求和不可变缓存头。
-- 自动生成 manifest 和缩略图缓存。
+- 自动建立 SQLite 索引，并按需生成缩略图缓存。
 - 优先支持 Docker 部署，适合 NAS 和家用服务器。
 
 ## Docker 镜像
@@ -123,10 +123,10 @@ services:
 | `LUMIFLOW_DATA_PATH` | 无 | 是 | manifest 和缩略图缓存目录，必须可写。Docker 内通常是 `/data`。 |
 | `LUMIFLOW_BIND_ADDRESS` | `0.0.0.0` | 否 | Rust 服务监听地址。Docker 应保持 `0.0.0.0`。 |
 | `LUMIFLOW_PORT` | `4320` | 否 | Rust 服务监听端口。 |
-| `LUMIFLOW_BUILDER_WORKERS` | `2` | 否 | 缩略图并发生成数量。小型 NAS 可以调低。 |
+| `LUMIFLOW_BUILDER_WORKERS` | `1` | 否 | 按需生成缩略图时允许的最大并发解码数。仅在主机内存足够时调高。 |
 | `LUMIFLOW_EXCLUDE_REGEX` | 内置 NAS/系统文件忽略正则 | 否 | 扫描时跳过的文件/目录正则。 |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | 否 | Rust 日志过滤规则。 |
-| `LUMIFLOW_ALBUM_MODE` | `folders` | 否 | `folders` 保留一级目录相册；`timeline` 同样保留一级文件夹边界，再递归扫描并在各文件夹内生成每日虚拟相册。 |
+| `LUMIFLOW_ALBUM_MODE` | `timeline` | 否 | `timeline` 默认递归扫描并写入 SQLite，同时保留一级文件夹边界；只有显式设为 `folders` 才使用旧的一级目录相册模式。 |
 | `LUMIFLOW_TIMELINE_TIMEZONE` | `Asia/Shanghai` | 否 | 时间线按日分组使用的 IANA 时区。 |
 | `LUMIFLOW_CALENDAR_REGION` | `CN_COMMON` | 否 | 节日命名区域；首个版本支持 `CN_COMMON`。 |
 | `LUMIFLOW_PLACE_PROVIDER` | 无 | 否 | 可选逆地理编码服务。设为 `nominatim` 才会显式允许 GPS 查询；未设置时仅使用地点缓存和路径回退，不会通过网络发送 GPS 数据。 |

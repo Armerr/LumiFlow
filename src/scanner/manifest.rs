@@ -32,6 +32,7 @@ pub struct PhotoEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct AlbumDetail {
     pub name: String,
+    pub photo_count: usize,
     pub photos: Vec<PhotoEntry>,
 }
 

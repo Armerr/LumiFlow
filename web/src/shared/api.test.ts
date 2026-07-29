@@ -57,13 +57,13 @@ describe('EXIF URL contracts', () => {
   })
 })
 
-describe('album identity', () => {
-  test('fetches album detail using the supplied album identity', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ name: 'Trip', photos: [] }) })
+describe('album pagination', () => {
+  test('fetches only the requested vertical-grid page', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ name: 'Trip', photo_count: 4750, photos: [] }) })
     vi.stubGlobal('fetch', fetchMock)
 
-    await api.album('day:2025-01-02')
+    await api.album('day:2025-01-02', 120, 60)
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/albums/day%3A2025-01-02')
+    expect(fetchMock).toHaveBeenCalledWith('/api/albums/day%3A2025-01-02?offset=120&limit=60')
   })
 })

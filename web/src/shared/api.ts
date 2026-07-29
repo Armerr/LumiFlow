@@ -22,9 +22,10 @@ export const api = {
     return fetchJson('/api/albums')
   },
 
-  /** GET /api/albums/:id. */
-  album(albumId: string): Promise<AlbumDetail> {
-    return fetchJson(`/api/albums/${encodeURIComponent(albumId)}`)
+  /** GET one page from /api/albums/:id. */
+  album(albumId: string, offset = 0, limit = 60): Promise<AlbumDetail> {
+    const query = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+    return fetchJson(`/api/albums/${encodeURIComponent(albumId)}?${query}`)
   },
 
   /** Fetch EXIF through the route matching the photo identity kind. */

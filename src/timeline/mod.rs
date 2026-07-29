@@ -452,6 +452,71 @@ mod tests {
         }
     }
 
+    fn timeline_test_config(photos: &Path, data: &Path) -> Config {
+        Config {
+            photos_path: photos.to_path_buf(),
+            data_path: data.to_path_buf(),
+            bind_address: "127.0.0.1".into(),
+            port: 4320,
+            builder_workers: 1,
+            exclude_regex: r"$^".into(),
+            album_mode: AlbumMode::Timeline,
+            timeline_timezone: "UTC".into(),
+            calendar_region: "CN_COMMON".into(),
+            place_provider: None,
+            place_base_url: None,
+            vision_tagger: VisionTaggerConfig::None,
+            vision_model_path: None,
+            vision_labels_path: None,
+            vision_workers: 1,
+            ai: AiConfig {
+                enabled: false,
+                base_url: None,
+                api_key: None,
+                model: None,
+                language: "zh-CN".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn open_fully_indexes_nested_photos_into_sqlite_before_returning() {
+        let photos = TestDir::new("initial-scan-photos");
+        let data = TestDir::new("initial-scan-data");
+        for relative in ["first/a.png", "first/nested/b.png", "second/c.png"] {
+            let path = photos.0.join(relative);
+            std::fs::create_dir_all(path.parent().expect("photo parent"))
+                .expect("create photo parent");
+            image::RgbImage::from_pixel(2, 2, image::Rgb([20, 80, 160]))
+                .save(path)
+                .expect("save photo");
+        }
+
+        let service = TimelineService::open(timeline_test_config(&photos.0, &data.0))
+            .await
+            .expect("open timeline service");
+
+        assert!(data.0.join("lumiflow.sqlite").is_file());
+        assert_eq!(
+            service
+                .db()
+                .list_active_photos()
+                .expect("indexed photos")
+                .len(),
+            3
+        );
+        assert_eq!(
+            service
+                .db()
+                .list_albums()
+                .expect("generated albums")
+                .iter()
+                .map(|album| album.photo_count)
+                .sum::<usize>(),
+            3,
+        );
+    }
+
     #[test]
     fn rescan_runs_local_enrichment_after_rebuilding_albums() {
         let photos = TestDir::new("photos");

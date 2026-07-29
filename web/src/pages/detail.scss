@@ -56,8 +56,8 @@
   overflow: hidden;
 
   @media (max-width: 768px) {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr auto;
+    display: block;
+    overflow-x: hidden;
     overflow-y: auto;
   }
 }
@@ -70,6 +70,8 @@
   touch-action: pan-y;
 
   img {
+    width: 100%;
+    height: 100%;
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
@@ -93,11 +95,15 @@
 
 @media (max-width: 768px) {
   .detail-photo {
+    min-height: min(68vh, 640px);
+    height: min(68vh, 640px);
     flex-direction: column;
     gap: 14px;
 
     img {
-      max-height: calc(100% - 48px);
+      width: 100%;
+      height: calc(100% - 48px);
+      max-height: none;
     }
   }
 
@@ -106,6 +112,11 @@
     align-items: center;
     justify-content: center;
     margin-top: 0;
+  }
+
+  .detail-sidebar {
+    margin-top: 18px;
+    overflow: visible;
   }
 }
 

@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::scanner::walk;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -7,7 +6,7 @@ use tokio::sync::Semaphore;
 mod generate;
 pub use generate::{decode_image, generate_thumbnail, get_dimensions};
 
-/// Background thumbnail generator with bounded concurrency.
+/// On-demand thumbnail generator with bounded blocking decode concurrency.
 #[derive(Clone)]
 pub struct ThumbnailPool {
     semaphore: Arc<Semaphore>,
@@ -15,84 +14,40 @@ pub struct ThumbnailPool {
 
 impl ThumbnailPool {
     pub fn new(config: &Config) -> Self {
-        let workers = config.builder_workers.max(1);
+        Self::from_worker_count(config.builder_workers)
+    }
+
+    fn from_worker_count(workers: usize) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(workers)),
+            semaphore: Arc::new(Semaphore::new(workers.max(1))),
         }
     }
 
-    /// Pre-generate thumbnails for all albums in the background.
-    pub fn pregenerate_all(&self, photos_path: PathBuf, data_path: PathBuf, exclude_regex: String) {
-        let sem = self.semaphore.clone();
-
-        tokio::spawn(async move {
-            tracing::info!("starting background thumbnail pre-generation...");
-
-            let regex = match regex::Regex::new(&exclude_regex) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("invalid exclude regex for pregeneration: {}", e);
-                    return;
-                }
-            };
-
-            let manifest = match walk::scan(&photos_path, &exclude_regex) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("pregenerate scan failed: {}", e);
-                    return;
-                }
-            };
-
-            let mut total = 0usize;
-            let mut generated = 0usize;
-            let mut errors = 0usize;
-
-            for album in &manifest.albums {
-                let album_dir = photos_path.join(&album.name);
-                let photos = walk::scan_album_photos(&album_dir, &regex);
-                total += photos.len();
-
-                for photo in &photos {
-                    let _permit = sem.acquire().await;
-                    let source = album_dir.join(&photo.name);
-                    let thumb_path = thumb_path(&data_path, &album.name, &photo.name);
-
-                    if thumb_is_fresh(&thumb_path, &source) {
-                        continue;
-                    }
-
-                    match generate_thumbnail(&source, 400, 80.0) {
-                        Ok(data) => {
-                            if let Some(parent) = thumb_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            if std::fs::write(&thumb_path, &data).is_ok() {
-                                generated += 1;
-                            }
-                        }
-                        Err(e) => {
-                            errors += 1;
-                            if errors <= 5 {
-                                tracing::warn!("thumbnail failed for {:?}: {}", source, e);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if errors > 5 {
-                tracing::warn!("... and {} more thumbnail errors", errors - 5);
-            }
-            tracing::info!(
-                "thumbnail pre-generation done: {}/{} generated",
-                generated,
-                total
-            );
-        });
+    pub async fn generate(&self, source: PathBuf, thumb_path: PathBuf) -> anyhow::Result<Vec<u8>> {
+        self.run_blocking(move || Self::generate_on_demand(&source, &thumb_path))
+            .await
     }
 
-    /// Generate a single thumbnail on-demand, returning the WebP data.
+    async fn run_blocking<F, T>(&self, operation: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("thumbnail worker pool is closed"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            operation()
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("thumbnail worker task failed: {error}"))?
+    }
+
+    /// Generate a single thumbnail synchronously for startup enrichment and watchers.
     pub fn generate_on_demand(source: &Path, thumb_path: &Path) -> anyhow::Result<Vec<u8>> {
         let data = generate_thumbnail(source, 400, 80.0)?;
         if let Some(parent) = thumb_path.parent() {
@@ -109,19 +64,6 @@ pub fn thumb_path(data_path: &Path, album: &str, filename: &str) -> PathBuf {
         .join("thumbs")
         .join(album)
         .join(format!("{}.webp", filename))
-}
-
-/// A cached thumbnail is fresh if it exists and is not older than its source.
-fn thumb_is_fresh(thumb_path: &Path, source: &Path) -> bool {
-    if !thumb_path.exists() {
-        return false;
-    }
-    let thumb_mtime = thumb_path.metadata().ok().and_then(|m| m.modified().ok());
-    let source_mtime = source.metadata().ok().and_then(|m| m.modified().ok());
-    match (thumb_mtime, source_mtime) {
-        (Some(t), Some(s)) => t >= s,
-        _ => false,
-    }
 }
 
 /// Construct the filesystem path for a timeline thumbnail keyed by stable photo ID.
@@ -195,5 +137,85 @@ mod timeline_tests {
         assert!(!timeline_thumb_is_fresh(&data, "photo-id", "fp-2"));
 
         let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_pool_bounds_blocking_decodes_to_configured_workers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let pool = ThumbnailPool::from_worker_count(1);
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let first_pool = pool.clone();
+        let first_active = active.clone();
+        let first_maximum = maximum.clone();
+        let second_pool = pool;
+        let second_active = active.clone();
+        let second_maximum = maximum.clone();
+
+        let first = first_pool.run_blocking(move || {
+            let current = first_active.fetch_add(1, Ordering::SeqCst) + 1;
+            first_maximum.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            first_active.fetch_sub(1, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(())
+        });
+        let second = second_pool.run_blocking(move || {
+            let current = second_active.fetch_add(1, Ordering::SeqCst) + 1;
+            second_maximum.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            second_active.fetch_sub(1, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let (first, second) = tokio::join!(first, second);
+        first.expect("first generation");
+        second.expect("second generation");
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_waiter_does_not_release_decode_permit_early() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use tokio::sync::oneshot;
+
+        let pool = ThumbnailPool::from_worker_count(1);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_pool = pool.clone();
+        let first = tokio::spawn(async move {
+            first_pool
+                .run_blocking(move || {
+                    started_tx.send(()).expect("announce first decode");
+                    release_rx.recv().expect("release first decode");
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+        });
+        started_rx.await.expect("first decode starts");
+        first.abort();
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let second_active = active.clone();
+        let second_pool = pool;
+        let second = tokio::spawn(async move {
+            second_pool
+                .run_blocking(move || {
+                    second_active.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+
+        release_tx.send(()).expect("finish first decode");
+        second
+            .await
+            .expect("second waiter task")
+            .expect("second decode");
+        assert_eq!(active.load(Ordering::SeqCst), 1);
     }
 }

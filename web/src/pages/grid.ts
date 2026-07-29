@@ -2,13 +2,12 @@ import { api } from '../shared/api'
 import { router } from '../shared/router'
 import type { Page } from '../shared/router'
 import type { AlbumDetail } from '../shared/types'
-import { GridScene } from './grid/GridScene'
+import { albumPhotoCount, VerticalPhotoGrid } from './grid/VerticalPhotoGrid'
 import './grid.scss'
 
 interface GridPageParams { name: string }
 export async function createGridPage({ name }: GridPageParams): Promise<Page> {
-  let scene: GridScene | null = null
-
+  let grid: VerticalPhotoGrid | null = null
 
   return {
     async mount(container: HTMLElement) {
@@ -20,32 +19,34 @@ export async function createGridPage({ name }: GridPageParams): Promise<Page> {
         return
       }
 
-      if (album.photos.length === 0) {
+      const photoCount = albumPhotoCount(album)
+      if (photoCount === 0) {
         container.innerHTML = '<div class="empty-state"><p>此相册暂无照片</p></div>'
         return
       }
 
       container.innerHTML = `
         <button class="back-btn" id="grid-back">← 返回</button>
-        <div class="grid-page">
-          ${renderGridHeader(album, album.photos.length)}
-          <div class="js-grid"></div>
-        </div>
+        <main class="grid-page">
+          ${renderGridHeader(album, photoCount)}
+          <div class="vertical-grid-stage" aria-label="相册照片"></div>
+        </main>
       `
 
       document.getElementById('grid-back')?.addEventListener('click', () => {
         router.navigate({ page: 'fan' })
       })
 
-      scene = new GridScene(container)
-      scene.init(name, album.photos)
-      scene.onPhotoClick = (idx: number) => {
-        router.navigate({ page: 'detail', album: name, photoId: idx })
-      }
+      const scroller = container.querySelector<HTMLElement>('.grid-page')
+      const stage = container.querySelector<HTMLElement>('.vertical-grid-stage')
+      if (!scroller || !stage) return
+      grid = new VerticalPhotoGrid(scroller, stage, name, photoCount, album.photos)
+      grid.mount()
     },
 
     unmount() {
-      scene?.dispose()
+      grid?.dispose()
+      grid = null
     },
   }
 }

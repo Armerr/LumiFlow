@@ -9,36 +9,9 @@ interface DetailPageParams {
   photoId: number
 }
 
-export interface SwipeGesture {
-  startX: number
-  endX: number
-  startY: number
-  endY: number
-}
-
-export function getSwipeTargetId(gesture: SwipeGesture, photoId: number, total: number): number | null {
-  const dx = gesture.endX - gesture.startX
-  const dy = gesture.endY - gesture.startY
-  const absX = Math.abs(dx)
-  const absY = Math.abs(dy)
-
-  if (absX < 48 || absX < absY * 1.25) return null
-  if (dx < 0) return photoId < total - 1 ? photoId + 1 : null
-  return photoId > 0 ? photoId - 1 : null
-}
-
-export function shouldBlockNativeDetailNavigation(gesture: SwipeGesture, viewportWidth: number): boolean {
-  const edgeWidth = Math.max(24, Math.min(40, viewportWidth * 0.08))
-  const startsAtHorizontalEdge = gesture.startX <= edgeWidth || gesture.startX >= viewportWidth - edgeWidth
-  if (!startsAtHorizontalEdge) return false
-
-  const dx = Math.abs(gesture.endX - gesture.startX)
-  const dy = Math.abs(gesture.endY - gesture.startY)
-  return dx >= 4 && dx > dy * 1.2
-}
 export async function createDetailPage({ album, photoId }: DetailPageParams): Promise<Page> {
-  let albumData = await api.album(album)
-  const photo = albumData.photos[photoId]
+  const albumData = await api.album(album, photoId, 1)
+  const photo = albumData.photos[0]
   let exif: ExifData | null = null
 
   if (photo) {
@@ -65,7 +38,7 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
       }
 
       const prevId = photoId > 0 ? photoId - 1 : null
-      const nextId = photoId < albumData.photos.length - 1 ? photoId + 1 : null
+      const nextId = photoId < (albumData.photo_count ?? albumData.photos.length) - 1 ? photoId + 1 : null
 
       container.innerHTML = `
         <button class="back-btn" id="detail-back">← 返回相册</button>
@@ -74,18 +47,14 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
             ${prevId !== null
               ? `<button class="nav-btn" id="detail-prev" title="上一张">←</button>`
               : `<span class="nav-btn disabled">←</span>`}
-            <span class="detail-pos">${photoId + 1} / ${albumData.photos.length}</span>
+            <span class="detail-pos">${photoId + 1} / ${albumData.photo_count ?? albumData.photos.length}</span>
             ${nextId !== null
               ? `<button class="nav-btn" id="detail-next" title="下一张">→</button>`
               : `<span class="nav-btn disabled">→</span>`}
           </div>
           <div class="detail-main">
             <div class="detail-photo">
-              <img
-                src="${api.photoUrl(album, photo)}"
-                alt="${escapeHtml(photo.name)}"
-                loading="eager"
-              />
+              ${renderDetailPreview(album, photo)}
               ${renderOriginalDownloadLink(album, photo)}
             </div>
             <aside class="detail-sidebar">
@@ -107,62 +76,6 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
         router.replace({ page: 'detail', album, photoId: nextId! })
       })
 
-      let swipeStart: { x: number; y: number } | null = null
-      let horizontalSwipe = false
-      const startSwipe = (x: number, y: number) => {
-        swipeStart = { x, y }
-        horizontalSwipe = false
-      }
-      const updateSwipe = (x: number, y: number) => {
-        if (!swipeStart) return false
-        const gesture = { startX: swipeStart.x, startY: swipeStart.y, endX: x, endY: y }
-        const dx = Math.abs(x - swipeStart.x)
-        const dy = Math.abs(y - swipeStart.y)
-        horizontalSwipe = shouldBlockNativeDetailNavigation(gesture, window.innerWidth) || (dx > 12 && dx > dy * 1.1)
-        return horizontalSwipe
-      }
-      const finishSwipe = (x: number, y: number) => {
-        if (!swipeStart) return
-        const targetId = getSwipeTargetId(
-          { startX: swipeStart.x, startY: swipeStart.y, endX: x, endY: y },
-          photoId,
-          albumData.photos.length,
-        )
-        swipeStart = null
-        horizontalSwipe = false
-        if (targetId !== null) router.replace({ page: 'detail', album, photoId: targetId })
-      }
-      const detailPage = container.querySelector<HTMLElement>('.detail-page')
-      detailPage?.addEventListener('pointerdown', (event) => {
-        if (event.pointerType !== 'mouse' || event.button !== 0) return
-        startSwipe(event.clientX, event.clientY)
-      })
-      detailPage?.addEventListener('pointerup', (event) => {
-        if (event.pointerType !== 'mouse') return
-        finishSwipe(event.clientX, event.clientY)
-      })
-      detailPage?.addEventListener('pointercancel', () => {
-        swipeStart = null
-        horizontalSwipe = false
-      })
-      detailPage?.addEventListener('touchstart', (event) => {
-        const touch = event.touches[0]
-        if (touch) startSwipe(touch.clientX, touch.clientY)
-      }, { passive: true })
-      detailPage?.addEventListener('touchmove', (event) => {
-        const touch = event.touches[0]
-        if (touch && updateSwipe(touch.clientX, touch.clientY)) event.preventDefault()
-      }, { passive: false })
-      detailPage?.addEventListener('touchend', (event) => {
-        const touch = event.changedTouches[0]
-        if (!touch) return
-        if (horizontalSwipe) event.preventDefault()
-        finishSwipe(touch.clientX, touch.clientY)
-      }, { passive: false })
-      detailPage?.addEventListener('touchcancel', () => {
-        swipeStart = null
-        horizontalSwipe = false
-      })
 
       keyHandler = (e: KeyboardEvent) => {
         if (e.key === 'ArrowLeft' && prevId !== null) {
@@ -181,6 +94,14 @@ export async function createDetailPage({ album, photoId }: DetailPageParams): Pr
       keyHandler = null
     },
   }
+}
+
+export function renderDetailPreview(albumId: string, photo: Photo): string {
+  return `<img
+    src="${api.thumbUrl(albumId, photo)}"
+    alt="${escapeAttr(photo.name)}"
+    loading="eager"
+  />`
 }
 
 export function renderOriginalDownloadLink(albumId: string, photo: PhotoInfo): string {

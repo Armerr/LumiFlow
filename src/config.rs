@@ -52,7 +52,7 @@ impl Config {
             data_path: required_path("LUMIFLOW_DATA_PATH")?,
             bind_address: env::var("LUMIFLOW_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0".into()),
             port: parse_or("LUMIFLOW_PORT", 4320)?,
-            builder_workers: parse_or("LUMIFLOW_BUILDER_WORKERS", 2)?,
+            builder_workers: parse_or("LUMIFLOW_BUILDER_WORKERS", 1)?,
             exclude_regex: env::var("LUMIFLOW_EXCLUDE_REGEX")
                 .unwrap_or_else(|_| r"(^|/)(@eaDir|#recycle|\.DS_Store|Thumbs\.db)(/|$)".into()),
             album_mode: parse_album_mode()?,
@@ -128,7 +128,7 @@ fn parse_album_mode() -> anyhow::Result<AlbumMode> {
                 bail!("unsupported LUMIFLOW_ALBUM_MODE `{value}`; expected `folders` or `timeline`")
             }
         },
-        Err(env::VarError::NotPresent) => Ok(AlbumMode::Folders),
+        Err(env::VarError::NotPresent) => Ok(AlbumMode::Timeline),
         Err(error) => Err(error).context("failed to read LUMIFLOW_ALBUM_MODE"),
     }
 }
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_folder_mode_with_optional_enrichment_disabled() {
+    fn config_defaults_to_timeline_mode_with_bounded_thumbnail_workers() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _snapshot = EnvSnapshot::capture(ENRICHMENT_ENV);
         clear_env(ENRICHMENT_ENV);
@@ -290,7 +290,8 @@ mod tests {
 
         let config = Config::from_env().expect("config");
         assert_eq!(config.port, 4320);
-        assert_eq!(config.album_mode, AlbumMode::Folders);
+        assert_eq!(config.album_mode, AlbumMode::Timeline);
+        assert_eq!(config.builder_workers, 1);
         assert_eq!(config.timeline_timezone, "Asia/Shanghai");
         assert_eq!(config.calendar_region, "CN_COMMON");
         assert_eq!(config.place_provider, None);

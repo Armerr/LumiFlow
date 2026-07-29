@@ -1,6 +1,6 @@
 # LumiFlow
 
-LumiFlow is a self-hosted photo album for local and NAS photo libraries. It supports folder albums and an opt-in SQLite-backed timeline mode for messy nested backups, generates cached WebP thumbnails, and serves a WebGL gallery UI from a single Rust binary. Original photo directories stay read-only.
+LumiFlow is a self-hosted photo album for local and NAS photo libraries. It recursively indexes mounted libraries into SQLite by default, generates cached WebP thumbnails on demand, and serves a WebGL album home plus a memory-bounded vertical photo grid from a single Rust binary. Original photo directories stay read-only.
 
 [简体中文文档](README.zh-CN.md)
 
@@ -12,11 +12,11 @@ Default port: `4320`.
 - Timeline albums: recursively index nested photos, keep first-level folders as hard boundaries, then build deterministic daily virtual albums within each folder without moving originals.
 - Optional local CPU vision tags and optional cached album descriptions from a low-resolution contact sheet.
 - WebGL album home with a folding-fan cover layout.
-- Infinite draggable photo grid for album browsing.
-- Photo detail view with keyboard, touch, and download support.
+- Native vertical-only album grid with paginated metadata, lazy thumbnails, and bounded DOM residency.
+- Photo detail view with keyboard controls, browser-compatible WebP preview, and original-file download.
 - EXIF metadata extraction for camera, lens, exposure, GPS, dimensions, and file details.
 - Original photo serving with Range requests and immutable cache headers.
-- Automatic manifest and thumbnail cache generation.
+- Automatic SQLite indexing and on-demand thumbnail cache generation.
 - Docker-first deployment for NAS and home servers.
 
 ## Docker image
@@ -123,10 +123,10 @@ services:
 | `LUMIFLOW_DATA_PATH` | none | yes | Writable directory for `manifest.json` and generated thumbnails. In Docker this is usually `/data`. |
 | `LUMIFLOW_BIND_ADDRESS` | `0.0.0.0` | no | Address the Rust server binds to. Docker should keep `0.0.0.0`. |
 | `LUMIFLOW_PORT` | `4320` | no | Rust server port. |
-| `LUMIFLOW_BUILDER_WORKERS` | `2` | no | Concurrent thumbnail generation workers. Lower it on small NAS devices. |
+| `LUMIFLOW_BUILDER_WORKERS` | `1` | no | Maximum concurrent on-demand thumbnail decodes. Raise it only when the host has sufficient memory. |
 | `LUMIFLOW_EXCLUDE_REGEX` | built-in NAS/system-file ignore regex | no | Regex for files/directories skipped during scans. |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | no | Rust log filter. |
-| `LUMIFLOW_ALBUM_MODE` | `folders` | no | `folders` keeps first-level directory albums; `timeline` keeps those folder boundaries and recursively builds daily virtual albums within each folder in SQLite. |
+| `LUMIFLOW_ALBUM_MODE` | `timeline` | no | `timeline` recursively indexes photos into SQLite while preserving first-level folder boundaries; set `folders` explicitly for legacy first-level directory albums. |
 | `LUMIFLOW_TIMELINE_TIMEZONE` | `Asia/Shanghai` | no | IANA timezone used for timeline date bucketing. |
 | `LUMIFLOW_CALENDAR_REGION` | `CN_COMMON` | no | Calendar naming region. The first release supports `CN_COMMON`. |
 | `LUMIFLOW_PLACE_PROVIDER` | none | no | Optional reverse-geocoding provider. Set to `nominatim` to explicitly allow GPS lookups; when unset, LumiFlow uses only its place cache and path fallback and sends no GPS data over the network. |

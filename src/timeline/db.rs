@@ -472,6 +472,46 @@ impl TimelineDb {
         })
     }
 
+    pub fn get_album_page(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<TimelineAlbumDetail>> {
+        self.with_connection(|connection| {
+            let album = connection
+                .query_row(
+                    "SELECT a.id, a.display_name, NULLIF(d.description, ''), a.date_start, a.date_end,
+                            a.place_name, a.holiday_name, a.photo_count, a.cover_photo_id
+                     FROM albums a
+                     LEFT JOIN album_ai_descriptions d ON d.album_id = a.id
+                     WHERE a.id = ?1",
+                    [id],
+                    map_album,
+                )
+                .optional()?;
+            let Some(album) = album else {
+                return Ok(None);
+            };
+
+            let mut statement = connection.prepare(
+                "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
+                        p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
+                 FROM album_photos ap
+                 JOIN photos p ON p.id = ap.photo_id
+                 WHERE ap.album_id = ?1 AND p.status = 'active'
+                 ORDER BY ap.sort_order, p.id
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let limit = i64::try_from(limit).context("album page limit exceeds SQLite range")?;
+            let offset = i64::try_from(offset).context("album page offset exceeds SQLite range")?;
+            let photos = statement
+                .query_map(params![id, limit, offset], map_photo)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(Some(TimelineAlbumDetail { album, photos }))
+        })
+    }
+
     pub fn get_photo(&self, id: &str) -> Result<Option<TimelinePhoto>> {
         self.with_connection(|connection| {
             Ok(connection

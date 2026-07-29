@@ -3,13 +3,32 @@ use crate::scanner::manifest::{AlbumDetail, Manifest};
 use crate::scanner::walk;
 use crate::thumbnail::{self, ThumbnailPool};
 use crate::timeline::TimelineService;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use regex::Regex;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+const DEFAULT_ALBUM_PAGE_SIZE: usize = 60;
+const MAX_ALBUM_PAGE_SIZE: usize = 120;
+
+#[derive(Debug, Deserialize)]
+pub struct AlbumPageQuery {
+    #[serde(default)]
+    offset: usize,
+    limit: Option<usize>,
+}
+
+impl AlbumPageQuery {
+    fn limit(&self) -> usize {
+        self.limit
+            .unwrap_or(DEFAULT_ALBUM_PAGE_SIZE)
+            .clamp(1, MAX_ALBUM_PAGE_SIZE)
+    }
+}
 
 /// Shared application state.
 pub struct AppState {
@@ -57,19 +76,28 @@ pub async fn list_albums(
 pub async fn get_album(
     State(state): State<SharedState>,
     Path(name): Path<String>,
+    Query(page): Query<AlbumPageQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let limit = page.limit();
     match state.config.album_mode {
         AlbumMode::Folders => {
             let photos = walk::get_album_detail(&state.config.photos_path, &name, &state.exclude)
                 .ok_or(StatusCode::NOT_FOUND)?;
+            let photo_count = photos.len();
+            let photos = photos.into_iter().skip(page.offset).take(limit).collect();
             Ok(Json(
-                serde_json::to_value(AlbumDetail { name, photos }).map_err(internal_error)?,
+                serde_json::to_value(AlbumDetail {
+                    name,
+                    photo_count,
+                    photos,
+                })
+                .map_err(internal_error)?,
             ))
         }
         AlbumMode::Timeline => {
             let detail = timeline_service(&state)?
                 .db()
-                .get_album(&name)
+                .get_album_page(&name, page.offset, limit)
                 .map_err(internal_error)?
                 .ok_or(StatusCode::NOT_FOUND)?;
             Ok(Json(serde_json::to_value(detail).map_err(internal_error)?))
@@ -176,8 +204,8 @@ pub async fn serve_thumbnail(
         }
     }
 
-    // Generate on demand
-    match ThumbnailPool::generate_on_demand(&source, &thumb_path) {
+    // Generate on demand outside the async executor, bounded by configured workers.
+    match state.thumbnails.generate(source, thumb_path).await {
         Ok(data) => Ok((
             StatusCode::OK,
             [
@@ -211,17 +239,14 @@ pub async fn serve_thumbnail_by_id(
         return serve_cached_file(&thumb_path, "image/webp").await;
     }
 
-    let source_for_generation = source.clone();
-    let thumb_for_generation = thumb_path.clone();
-    let data = tokio::task::spawn_blocking(move || {
-        ThumbnailPool::generate_on_demand(&source_for_generation, &thumb_for_generation)
-    })
-    .await
-    .map_err(internal_error)?
-    .map_err(|error| {
-        tracing::warn!("timeline thumbnail generation failed for {photo_id}: {error:#}");
-        StatusCode::NOT_FOUND
-    })?;
+    let data = state
+        .thumbnails
+        .generate(source, thumb_path.clone())
+        .await
+        .map_err(|error| {
+            tracing::warn!("timeline thumbnail generation failed for {photo_id}: {error:#}");
+            StatusCode::NOT_FOUND
+        })?;
     thumbnail::write_timeline_thumb_fingerprint(
         &state.config.data_path,
         &photo.id,

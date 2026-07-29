@@ -51,11 +51,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 config.exclude_regex.clone(),
                 manifest.clone(),
             );
-            pool.pregenerate_all(
-                config.photos_path.clone(),
-                config.data_path.clone(),
-                config.exclude_regex.clone(),
-            );
             (Some(manifest), None)
         }
         AlbumMode::Timeline => {
@@ -545,6 +540,7 @@ mod tests {
         let photos = TestDir::new("folder-mode-photos");
         let data = TestDir::new("folder-mode-data");
         photos.write("album/a.jpg", b"photo");
+        photos.write("album/b.jpg", b"photo");
         let mut config = router_test_state().config.clone();
         config.photos_path = photos.path().to_path_buf();
         config.data_path = data.path().to_path_buf();
@@ -569,12 +565,12 @@ mod tests {
         let list_json: serde_json::Value =
             serde_json::from_slice(&response_bytes(list).await).expect("list json");
         assert_eq!(list_json["albums"][0]["name"], "album");
-        assert_eq!(list_json["albums"][0]["count"], 1);
+        assert_eq!(list_json["albums"][0]["count"], 2);
 
         let detail = build_router(state.clone())
             .oneshot(
                 Request::builder()
-                    .uri("/api/albums/album")
+                    .uri("/api/albums/album?offset=1&limit=1")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -582,8 +578,10 @@ mod tests {
             .expect("response");
         let detail_json: serde_json::Value =
             serde_json::from_slice(&response_bytes(detail).await).expect("detail json");
-        assert_eq!(detail_json["photos"][0]["id"], 0);
-        assert_eq!(detail_json["photos"][0]["name"], "a.jpg");
+        assert_eq!(detail_json["photo_count"], 2);
+        assert_eq!(detail_json["photos"].as_array().map(Vec::len), Some(1));
+        assert_eq!(detail_json["photos"][0]["id"], 1);
+        assert_eq!(detail_json["photos"][0]["name"], "b.jpg");
 
         let rescan = build_router(state)
             .oneshot(
@@ -611,6 +609,8 @@ mod tests {
         let db = crate::timeline::db::TimelineDb::open(data.path().join("lumiflow.sqlite"))
             .expect("timeline db");
         insert_timeline_photo(&db, "p1", "nested/a.png", "fp-a", serde_json::json!({}));
+        insert_timeline_photo(&db, "p2", "nested/b.png", "fp-b", serde_json::json!({}));
+        insert_timeline_photo(&db, "p3", "nested/c.png", "fp-c", serde_json::json!({}));
         db.replace_daily_albums(&[DailyAlbumBuild {
             album: TimelineAlbum {
                 id: "auto-day:2024-02-10".into(),
@@ -620,10 +620,10 @@ mod tests {
                 date_end: chrono::NaiveDate::from_ymd_opt(2024, 2, 10),
                 place: None,
                 holiday: None,
-                photo_count: 1,
+                photo_count: 3,
                 cover_photo_id: Some("p1".into()),
             },
-            photo_ids: vec!["p1".into()],
+            photo_ids: vec!["p1".into(), "p2".into(), "p3".into()],
         }])
         .expect("album");
         let state = timeline_test_state(config, db);
@@ -645,7 +645,7 @@ mod tests {
         let detail = build_router(state)
             .oneshot(
                 Request::builder()
-                    .uri("/api/albums/auto-day%3A2024-02-10")
+                    .uri("/api/albums/auto-day%3A2024-02-10?offset=1&limit=1")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -654,7 +654,9 @@ mod tests {
         assert_eq!(detail.status(), StatusCode::OK);
         let detail_json: serde_json::Value =
             serde_json::from_slice(&response_bytes(detail).await).expect("detail json");
-        assert_eq!(detail_json["photos"][0]["id"], "p1");
+        assert_eq!(detail_json["photo_count"], 3);
+        assert_eq!(detail_json["photos"].as_array().map(Vec::len), Some(1));
+        assert_eq!(detail_json["photos"][0]["id"], "p2");
     }
 
     #[tokio::test]
