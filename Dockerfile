@@ -6,8 +6,8 @@ RUN npm ci 2>/dev/null || npm install
 COPY web/ ./
 RUN npm run build
 
-# Stage 2: Rust build (glibc; ort rc.13 publishes GNU Linux archives for amd64/arm64)
-FROM rust:1.88-bookworm AS backend
+# Stage 2: Rust build (glibc; ort rc.13 requires the GNU C++ ABI shipped by Debian Trixie)
+FROM rust:1.88-trixie AS backend
 ARG LUMIFLOW_CARGO_FEATURES=""
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates \
@@ -24,9 +24,9 @@ RUN cargo build --release --locked ${LUMIFLOW_CARGO_FEATURES:+--features "$LUMIF
 RUN strip target/release/lumiflow
 
 # Stage 3: Runtime
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates tzdata \
+    && apt-get install --yes --no-install-recommends ca-certificates libstdc++6 tzdata \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /build/target/release/lumiflow /usr/local/bin/lumiflow
 EXPOSE 4320

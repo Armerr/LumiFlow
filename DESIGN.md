@@ -65,10 +65,10 @@ It reads a mounted photo directory read-only and supports two backend album mode
 
 | Layer | Choice | Rationale |
 |-------|--------|-----------|
-| Container | Multi-stage Docker → `debian:bookworm-slim` | glibc runtime available for both published architectures; runtime installs only CA certificates and timezone data. |
-| Build stages | `rust:1.88-bookworm` + `node:22-alpine` | The frontend remains architecture-neutral; the Rust builder emits GNU Linux binaries for the selected platform. |
+| Container | Multi-stage Docker → `debian:trixie-slim` | glibc runtime available for both published architectures; runtime installs CA certificates, timezone data, and the GNU C++ runtime required by optional ONNX inference. |
+| Build stages | `rust:1.88-trixie` + `node:22-alpine` | The frontend remains architecture-neutral; the Rust builder emits GNU Linux binaries for the selected platform and provides the C++ ABI required by `ort` rc.13 archives. |
 | Volumes | `photos:/photos:ro`, `data:/data` | Photos read-only, generated data writable. |
-| ONNX build | Disabled by default; `LUMIFLOW_CARGO_FEATURES=vision-onnx` opts in | `ort` rc.13 supplies CPU archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` and statically links `libonnxruntime.a`; model/tagset assets remain explicit read-only mounts. |
+| ONNX build | Disabled by default; `LUMIFLOW_CARGO_FEATURES=vision-onnx` opts in | `ort` rc.13 supplies CPU archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`, statically links `libonnxruntime.a`, and dynamically uses Trixie's `libstdc++6`; model/tagset assets remain explicit read-only mounts. |
 | Entry | Cloudflare Tunnel (optional) | HTTPS via Cloudflare, no port forwarding. |
 
 

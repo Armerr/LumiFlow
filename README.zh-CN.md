@@ -44,7 +44,7 @@ docker build -t lumiflow:local .
 docker build --build-arg LUMIFLOW_CARGO_FEATURES=vision-onnx -t lumiflow:vision-onnx .
 ```
 
-`ort` rc.13 会下载对应的 `x86_64-unknown-linux-gnu` 或 `aarch64-unknown-linux-gnu` CPU 归档，并把 ONNX Runtime 静态链接进 LumiFlow 可执行文件，因此运行时镜像不需要单独的 ONNX Runtime 共享库或动态加载路径配置。模型和标签向量文件仍需在运行时以只读方式显式挂载。
+`ort` rc.13 会下载对应的 `x86_64-unknown-linux-gnu` 或 `aarch64-unknown-linux-gnu` CPU 归档，并把 ONNX Runtime 静态链接进 LumiFlow 可执行文件。镜像使用 Debian Trixie，因为这些归档依赖其较新的 GNU C++ ABI；运行时会安装 `libstdc++6`，但不需要单独的 ONNX Runtime 共享库或动态加载路径配置。模型和标签向量文件仍需在运行时以只读方式显式挂载。
 
 ## Docker Compose 快速开始
 

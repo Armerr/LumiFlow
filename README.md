@@ -44,7 +44,7 @@ The default image uses glibc and intentionally excludes ONNX code and runtime as
 docker build --build-arg LUMIFLOW_CARGO_FEATURES=vision-onnx -t lumiflow:vision-onnx .
 ```
 
-`ort` rc.13 downloads the matching `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` CPU archive and statically links ONNX Runtime into the LumiFlow executable, so the runtime image needs no separate ONNX Runtime shared library or loader-path configuration. The model and label-vector files are still explicit read-only runtime mounts.
+`ort` rc.13 downloads the matching `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` CPU archive and statically links ONNX Runtime into the LumiFlow executable. The image uses Debian Trixie because those archives require its newer GNU C++ ABI; the runtime installs `libstdc++6` but needs no separate ONNX Runtime shared library or loader-path configuration. The model and label-vector files are still explicit read-only runtime mounts.
 
 ## Docker Compose quick start
 
