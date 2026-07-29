@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import gsap from 'gsap'
 import type { Photo } from '../../shared/types'
 import { api } from '../../shared/api'
-import { buildInfiniteGridItems, getContainedPhotoSize, getGridColumnCount, getGridFieldSize, getGridMotionMultiplier, getGridPlaneInset, REFERENCE_GRID_ITEM_COUNT, type InfiniteGridItem } from './gridLayout'
+import { buildInfiniteGridItems, getContainedPhotoSize, getGridColumnCount, getGridFieldSize, getGridMotionMultiplier, getGridPlaneInset, resolveGridHitSourceIndex, REFERENCE_GRID_ITEM_COUNT, type InfiniteGridItem } from './gridLayout'
 // Shader pair mirrors the draggable WebGL grid reference: DOM-measured planes,
 // cover-fit UVs, and drag-diff geometry compression.
 
@@ -190,6 +190,8 @@ export class GridScene {
   private camera!: THREE.OrthographicCamera
   private renderer!: THREE.WebGLRenderer
   private planes: Plane[] = []
+  private raycaster = new THREE.Raycaster()
+  private pointer = new THREE.Vector2()
   private gridEl!: HTMLElement
   private photos: Photo[] = []
   private gridItems: InfiniteGridItem[] = []
@@ -237,20 +239,9 @@ export class GridScene {
     this.gridEl.innerHTML = this.gridItems
       .map(
         (item) =>
-          `<div><figure class="js-plane" data-key="${item.key}" data-index="${item.sourceIndex}" aria-label="${escapeAttr(item.photo.name)}"></figure></div>`,
+          `<div><figure class="js-plane" data-key="${item.key}" aria-label="${escapeAttr(item.photo.name)}"></figure></div>`,
       )
       .join('')
-
-    this.gridEl.querySelectorAll<HTMLElement>('.js-plane').forEach((el, i) => {
-      el.addEventListener('click', (event) => {
-        if (this.suppressClick) {
-          event.preventDefault()
-          event.stopPropagation()
-          return
-        }
-        this.onPhotoClick?.(this.gridItems[i].sourceIndex)
-      })
-    })
   }
 
   private addPlanes() {
@@ -258,6 +249,7 @@ export class GridScene {
     els.forEach((el, i) => {
       const plane = new Plane()
       plane.init(el, i, getGridColumnCount(window.innerWidth))
+      plane.mesh.userData.gridItemIndex = i
       plane.loadTexture(this.album, this.gridItems[i].photo)
       this.scene.add(plane)
       this.planes.push(plane)
@@ -268,7 +260,7 @@ export class GridScene {
     window.addEventListener('pointermove', this.onPointerMove)
     window.addEventListener('pointerdown', this.onPointerDown)
     window.addEventListener('pointerup', this.onPointerUp)
-    window.addEventListener('pointercancel', this.onPointerUp)
+    window.addEventListener('pointercancel', this.onPointerCancel)
     window.addEventListener('wheel', this.onWheel, { passive: false })
     window.addEventListener('keydown', this.onKeyDown)
   }
@@ -297,7 +289,13 @@ export class GridScene {
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    if (e.button !== 0 || this.isDragging) return
+    const target = e.target
+    if (
+      e.button !== 0
+      || this.isDragging
+      || !(target instanceof Element)
+      || !target.closest('.grid-page')
+    ) return
     this.isDragging = true
     this.suppressClick = false
     this.dragStart.x = e.clientX
@@ -307,11 +305,33 @@ export class GridScene {
     this.container.classList.add('is-dragging')
   }
 
-  private onPointerUp = () => {
+  private onPointerUp = (e: PointerEvent) => {
     if (!this.isDragging) return
     this.isDragging = false
     this.container.classList.remove('is-dragging')
-    if (this.suppressClick) window.setTimeout(() => { this.suppressClick = false }, 0)
+
+    if (!this.suppressClick) {
+      this.pointer.set(
+        (e.clientX / window.innerWidth) * 2 - 1,
+        -(e.clientY / window.innerHeight) * 2 + 1,
+      )
+      this.raycaster.setFromCamera(this.pointer, this.camera)
+      const sourceIndex = resolveGridHitSourceIndex(
+        this.raycaster.intersectObjects(this.planes.map((plane) => plane.mesh)),
+        this.gridItems,
+      )
+      if (sourceIndex !== null) this.onPhotoClick?.(sourceIndex)
+      return
+    }
+
+    window.setTimeout(() => { this.suppressClick = false }, 0)
+  }
+
+  private onPointerCancel = () => {
+    if (!this.isDragging) return
+    this.isDragging = false
+    this.suppressClick = false
+    this.container.classList.remove('is-dragging')
   }
 
   private onWheel = (e: WheelEvent) => {
@@ -372,7 +392,7 @@ export class GridScene {
     window.removeEventListener('pointermove', this.onPointerMove)
     window.removeEventListener('pointerdown', this.onPointerDown)
     window.removeEventListener('pointerup', this.onPointerUp)
-    window.removeEventListener('pointercancel', this.onPointerUp)
+    window.removeEventListener('pointercancel', this.onPointerCancel)
     window.removeEventListener('wheel', this.onWheel)
     window.removeEventListener('keydown', this.onKeyDown)
     this.container.classList.remove('is-dragging')

@@ -5,6 +5,7 @@ use crate::timeline::places::PlaceResolver;
 use anyhow::Result;
 use chrono::{DateTime, FixedOffset};
 use chrono_tz::Tz;
+use sha1::{Digest, Sha1};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -25,7 +26,7 @@ pub fn build_daily_albums(
     places: &(impl PlaceResolver + ?Sized),
 ) -> Result<Vec<DailyAlbumBuild>> {
     let mut days: BTreeMap<
-        Option<chrono::NaiveDate>,
+        (String, Option<chrono::NaiveDate>),
         Vec<(&TimelinePhoto, Option<DateTime<FixedOffset>>)>,
     > = BTreeMap::new();
     for photo in photos {
@@ -34,11 +35,14 @@ pub fn build_daily_albums(
             .as_deref()
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok());
         let date = timestamp.map(|value| value.with_timezone(&timezone).date_naive());
-        days.entry(date).or_default().push((photo, timestamp));
+        let folder = first_level_folder(&photo.relative_path).to_owned();
+        days.entry((folder, date))
+            .or_default()
+            .push((photo, timestamp));
     }
 
     let mut builds = Vec::with_capacity(days.len());
-    for (date, mut members) in days {
+    for ((folder, date), mut members) in days {
         members.sort_by(|(left_photo, left_time), (right_photo, right_time)| {
             compare_members(left_photo, *left_time, right_photo, *right_time)
         });
@@ -60,14 +64,20 @@ pub fn build_daily_albums(
         let (id, name, holiday, place) = match date {
             Some(date) => {
                 let holiday = holiday_for(date);
+                let date_name = format_album_name(date, &resolved_places, holiday);
                 (
-                    format!("auto-day:{date}"),
-                    format_album_name(date, &resolved_places, holiday),
+                    dated_album_id(&folder, date),
+                    folder_album_name(&folder, &date_name),
                     holiday.map(str::to_owned),
                     place_summary(&resolved_places),
                 )
             }
-            None => ("unknown-date".into(), "Unknown Date".into(), None, None),
+            None => (
+                unknown_album_id(&folder),
+                folder_album_name(&folder, "Unknown Date"),
+                None,
+                None,
+            ),
         };
         let photo_count = photo_ids.len();
         builds.push(DailyAlbumBuild {
@@ -91,6 +101,7 @@ pub fn build_daily_albums(
             .is_none()
             .cmp(&right.album.date_start.is_none())
             .then_with(|| left.album.date_start.cmp(&right.album.date_start))
+            .then_with(|| left.album.name.cmp(&right.album.name))
             .then_with(|| left.album.id.cmp(&right.album.id))
     });
     Ok(builds)
@@ -111,6 +122,47 @@ pub fn format_album_name(
         name.push_str(holiday);
     }
     name
+}
+
+fn first_level_folder(relative_path: &str) -> &str {
+    relative_path
+        .split_once('/')
+        .map_or("", |(folder, _)| folder)
+}
+
+fn dated_album_id(folder: &str, date: chrono::NaiveDate) -> String {
+    if folder.is_empty() {
+        format!("auto-day:{date}")
+    } else {
+        format!("auto-day:{date}:{}", folder_fingerprint(folder))
+    }
+}
+
+fn unknown_album_id(folder: &str) -> String {
+    if folder.is_empty() {
+        "unknown-date".into()
+    } else {
+        format!("unknown-date:{}", folder_fingerprint(folder))
+    }
+}
+
+fn folder_album_name(folder: &str, time_name: &str) -> String {
+    if folder.is_empty() {
+        time_name.into()
+    } else {
+        format!("{folder} · {time_name}")
+    }
+}
+
+fn folder_fingerprint(folder: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha1::digest(folder.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn compare_members(
@@ -202,10 +254,61 @@ mod tests {
     }
 
     #[test]
-    fn puts_missing_and_invalid_times_in_exactly_named_unknown_album() {
+    fn keeps_first_level_folders_separate_before_grouping_by_day() {
         let photos = vec![
-            photo("missing", "z/missing.jpg", None),
-            photo("invalid", "a/invalid.jpg", Some("not-a-time")),
+            photo("trip", "Trips/Kyoto/a.jpg", Some("2024-03-12T09:00:00Z")),
+            photo("family", "Family/b.jpg", Some("2024-03-12T10:00:00Z")),
+        ];
+
+        let albums =
+            build_daily_albums(&photos, chrono_tz::UTC, &FixedPlaces(vec![])).expect("album build");
+
+        assert_eq!(albums.len(), 2);
+        assert_ne!(albums[0].album.id, albums[1].album.id);
+        assert_eq!(albums[0].photo_ids, ["family"]);
+        assert_eq!(albums[1].photo_ids, ["trip"]);
+        assert_eq!(albums[0].album.name, "Family · 2024-03-12");
+        assert_eq!(albums[1].album.name, "Trips · 2024-03-12");
+    }
+
+    #[test]
+    fn keeps_nested_photos_together_within_the_same_first_level_folder() {
+        let photos = vec![
+            photo("kyoto", "Trips/Kyoto/a.jpg", Some("2024-03-12T09:00:00Z")),
+            photo("tokyo", "Trips/Tokyo/b.jpg", Some("2024-03-12T10:00:00Z")),
+        ];
+
+        let albums =
+            build_daily_albums(&photos, chrono_tz::UTC, &FixedPlaces(vec![])).expect("album build");
+
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].album.name, "Trips · 2024-03-12");
+        assert_eq!(albums[0].photo_ids, ["kyoto", "tokyo"]);
+    }
+
+    #[test]
+    fn keeps_unknown_dates_separate_by_first_level_folder() {
+        let photos = vec![
+            photo("trip", "Trips/missing.jpg", None),
+            photo("family", "Family/invalid.jpg", Some("not-a-time")),
+        ];
+
+        let albums =
+            build_daily_albums(&photos, chrono_tz::UTC, &FixedPlaces(vec![])).expect("album build");
+
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].album.name, "Family · Unknown Date");
+        assert_eq!(albums[1].album.name, "Trips · Unknown Date");
+        assert!(albums
+            .iter()
+            .all(|build| build.album.id.starts_with("unknown-date:")));
+    }
+
+    #[test]
+    fn puts_root_missing_and_invalid_times_in_exactly_named_unknown_album() {
+        let photos = vec![
+            photo("missing", "missing.jpg", None),
+            photo("invalid", "invalid.jpg", Some("not-a-time")),
         ];
 
         let albums =
@@ -265,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn build_includes_deterministic_place_and_holiday_name() {
+    fn build_includes_folder_place_and_holiday_name() {
         let photos = vec![photo(
             "spring",
             "Shanghai/spring.jpg",
@@ -279,10 +382,11 @@ mod tests {
         )
         .expect("album build");
 
-        assert_eq!(albums[0].album.name, "2024-02-10 上海 · 春节");
+        assert_eq!(albums[0].album.name, "Shanghai · 2024-02-10 上海 · 春节");
         assert_eq!(albums[0].album.place.as_deref(), Some("上海"));
         assert_eq!(albums[0].album.holiday.as_deref(), Some("春节"));
     }
+
     #[test]
     fn rebuild_loads_active_photos_and_replaces_database_albums() {
         let db = TimelineDb::open_in_memory().expect("db");
@@ -323,7 +427,7 @@ mod tests {
         assert_eq!(builds.len(), 1);
         assert_eq!(
             db.list_albums().expect("albums")[0].name,
-            "2024-02-10 上海 · 春节"
+            "Shanghai · 2024-02-10 上海 · 春节"
         );
     }
 }

@@ -9,7 +9,7 @@ Default port: `4320`.
 ## Features
 
 - Folder-based albums: every first-level directory under the photo root becomes one album.
-- Timeline albums: recursively index nested photos, resolve capture time, and build deterministic daily virtual albums without moving originals.
+- Timeline albums: recursively index nested photos, keep first-level folders as hard boundaries, then build deterministic daily virtual albums within each folder without moving originals.
 - Optional local CPU vision tags and optional cached album descriptions from a low-resolution contact sheet.
 - WebGL album home with a folding-fan cover layout.
 - Infinite draggable photo grid for album browsing.
@@ -126,7 +126,7 @@ services:
 | `LUMIFLOW_BUILDER_WORKERS` | `2` | no | Concurrent thumbnail generation workers. Lower it on small NAS devices. |
 | `LUMIFLOW_EXCLUDE_REGEX` | built-in NAS/system-file ignore regex | no | Regex for files/directories skipped during scans. |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | no | Rust log filter. |
-| `LUMIFLOW_ALBUM_MODE` | `folders` | no | `folders` keeps first-level directory albums; `timeline` recursively builds daily virtual albums in SQLite. |
+| `LUMIFLOW_ALBUM_MODE` | `folders` | no | `folders` keeps first-level directory albums; `timeline` keeps those folder boundaries and recursively builds daily virtual albums within each folder in SQLite. |
 | `LUMIFLOW_TIMELINE_TIMEZONE` | `Asia/Shanghai` | no | IANA timezone used for timeline date bucketing. |
 | `LUMIFLOW_CALENDAR_REGION` | `CN_COMMON` | no | Calendar naming region. The first release supports `CN_COMMON`. |
 | `LUMIFLOW_PLACE_PROVIDER` | none | no | Optional reverse-geocoding provider. Set to `nominatim` to explicitly allow GPS lookups; when unset, LumiFlow uses only its place cache and path fallback and sends no GPS data over the network. |
@@ -213,7 +213,7 @@ Privacy boundary: local tagging reads cached thumbnails only and stays on-device
     └── IMG_0001.png
 ```
 
-In `folders` mode, only first-level directories become albums and root-level photos are ignored. In `timeline` mode, supported photos are indexed recursively at any depth, including directly under the root.
+In `folders` mode, only first-level directories become albums and root-level photos are ignored. In `timeline` mode, supported photos are indexed recursively at any depth, but photos from different first-level folders are never merged into the same generated album; local-day grouping happens within each folder. Root-level photos use a separate root bucket.
 
 ## Run from source
 

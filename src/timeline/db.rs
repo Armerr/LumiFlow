@@ -331,7 +331,7 @@ impl TimelineDb {
             )?;
 
             for build in albums {
-                let album_type = if build.album.id == "unknown-date" {
+                let album_type = if build.album.id.starts_with("unknown-date") {
                     "unknown_date"
                 } else {
                     "auto_day"

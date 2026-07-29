@@ -75,9 +75,9 @@ It reads a mounted photo directory read-only and supports two backend album mode
 ## 2.1 Album modes and enrichment boundary
 
 - `folders` is the compatibility default: first-level directories and `manifest.json` remain the source of truth.
-- `timeline` recursively scans supported photos, persists stat/EXIF/GPS metadata in `lumiflow.sqlite`, buckets photos by configured local day, and serves originals/thumbnails/EXIF through stable photo IDs.
+- `timeline` recursively scans supported photos, persists stat/EXIF/GPS metadata in `lumiflow.sqlite`, preserves each first-level folder as a hard album boundary, then buckets by configured local day within that folder. Root-level photos use their own bucket.
 - Original paths are never copied, moved, renamed, linked, or written.
-- Daily album identity, display name, ordering, membership, and cover are deterministic. Local vision and remote AI are post-processing only.
+- Generated album identity includes both the first-level folder and local day; display name, ordering, membership, and cover are deterministic. Local vision and remote AI are post-processing only.
 - Local vision reads generated thumbnails, caches model/tagset/fingerprint results in SQLite, and never downloads assets or sends data off-device.
 - AI reads at most 36 representative thumbnails through one `224px`-cell JPEG contact sheet plus deterministic metadata. It returns description, keywords, and confidence only. It cannot return or override a title.
 - Failures are isolated: thumbnail/vision/contact-sheet/AI failures are counted and logged while albums and original serving remain available. A later rescan retries work whose fingerprint lacks a valid cache entry.

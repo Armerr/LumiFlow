@@ -9,7 +9,7 @@ LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它既支
 ## 功能
 
 - 按文件夹组织相册：照片根目录下的每个一级子目录就是一个相册。
-- 时间线相册：递归索引嵌套照片、解析拍摄时间，并按自然日稳定生成虚拟相册，不移动原图。
+- 时间线相册：递归索引嵌套照片，先以一级文件夹为硬边界，再在各文件夹内按自然日稳定生成虚拟相册，不移动原图。
 - 可选本地 CPU 视觉标签，以及通过低分辨率 contact sheet 生成并缓存的相册描述。
 - WebGL 折扇式相册首页。
 - 可拖拽的无限照片网格相册页。
@@ -126,7 +126,7 @@ services:
 | `LUMIFLOW_BUILDER_WORKERS` | `2` | 否 | 缩略图并发生成数量。小型 NAS 可以调低。 |
 | `LUMIFLOW_EXCLUDE_REGEX` | 内置 NAS/系统文件忽略正则 | 否 | 扫描时跳过的文件/目录正则。 |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | 否 | Rust 日志过滤规则。 |
-| `LUMIFLOW_ALBUM_MODE` | `folders` | 否 | `folders` 保留一级目录相册；`timeline` 递归扫描并在 SQLite 中生成每日虚拟相册。 |
+| `LUMIFLOW_ALBUM_MODE` | `folders` | 否 | `folders` 保留一级目录相册；`timeline` 同样保留一级文件夹边界，再递归扫描并在各文件夹内生成每日虚拟相册。 |
 | `LUMIFLOW_TIMELINE_TIMEZONE` | `Asia/Shanghai` | 否 | 时间线按日分组使用的 IANA 时区。 |
 | `LUMIFLOW_CALENDAR_REGION` | `CN_COMMON` | 否 | 节日命名区域；首个版本支持 `CN_COMMON`。 |
 | `LUMIFLOW_PLACE_PROVIDER` | 无 | 否 | 可选逆地理编码服务。设为 `nominatim` 才会显式允许 GPS 查询；未设置时仅使用地点缓存和路径回退，不会通过网络发送 GPS 数据。 |
@@ -213,7 +213,7 @@ environment:
     └── IMG_0001.png
 ```
 
-`folders` 模式只有一级子目录会成为相册，根目录照片会被忽略；`timeline` 模式会递归索引任意深度的受支持照片，也包括直接放在根目录中的照片。
+`folders` 模式只有一级子目录会成为相册，根目录照片会被忽略；`timeline` 模式会递归索引任意深度的受支持照片，但不同一级文件夹的照片绝不会合并到同一个生成相册中，按自然日分组只在各自文件夹内进行。根目录照片使用独立的根目录分组桶。
 
 ## 从源码运行
 

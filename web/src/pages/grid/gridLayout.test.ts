@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { buildInfiniteGridItems, getContainedPhotoSize, getGridColumnCount, getGridFieldSize, getGridMotionMultiplier, getGridPlaneInset, REFERENCE_GRID_ITEM_COUNT } from './gridLayout'
+import { buildInfiniteGridItems, getContainedPhotoSize, getGridColumnCount, getGridFieldSize, getGridMotionMultiplier, getGridPlaneInset, resolveGridHitSourceIndex, REFERENCE_GRID_ITEM_COUNT } from './gridLayout'
 import type { Photo } from '../../shared/types'
 
 const photo = (id: number): Photo => ({
@@ -56,5 +56,14 @@ describe('grid layout', () => {
       expect(Math.round(cell.width - size.width)).toBeLessThanOrEqual(10)
       expect(Math.round(cell.height - size.height)).toBeLessThanOrEqual(10)
     }
+  })
+
+  test('maps the rendered plane hit back to its real photo index', () => {
+    const items = buildInfiniteGridItems([photo(0), photo(1), photo(2)], REFERENCE_GRID_ITEM_COUNT)
+    const hits = [{ object: { userData: { gridItemIndex: 13 } } }]
+
+    expect(resolveGridHitSourceIndex(hits, items)).toBe(1)
+    expect(resolveGridHitSourceIndex([], items)).toBeNull()
+    expect(resolveGridHitSourceIndex([{ object: { userData: {} } }], items)).toBeNull()
   })
 })

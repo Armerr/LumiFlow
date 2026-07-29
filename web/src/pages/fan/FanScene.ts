@@ -105,7 +105,7 @@ export class FanScene {
 
     this.scene = new THREE.Scene()
 
-    this.renderer.domElement.addEventListener('wheel', this.onWheel, { passive: false })
+    this.container.addEventListener('wheel', this.onWheel, { passive: false })
     this.container.addEventListener('pointerdown', this.onDown)
     window.addEventListener('pointermove', this.onMove)
     window.addEventListener('pointerup', this.onUp)
@@ -127,13 +127,14 @@ export class FanScene {
     this.activeAlbumIndex = -1
     const total = albums.length
     for (let i = 0; i < total; i++) {
-      const card = new Card(albums[i], i, total)
+      const album = albums[i]
+      const card = new Card(album, i, total)
       const label = document.createElement('button')
       label.className = 'fan-card-hit'
       label.type = 'button'
-      label.innerHTML = `<span>${escapeHtml(albums[i].name)}</span>${albums[i].description ? `<small>${escapeHtml(albums[i].description)}</small>` : ''}<small>${albumPhotoCount(albums[i])} 张照片</small>`
+      label.innerHTML = `<span>${escapeHtml(album.name)}</span>${album.description ? `<small>${escapeHtml(album.description)}</small>` : ''}<small>${albumPhotoCount(album)} 张照片</small>`
       label.addEventListener('click', () => {
-        if (!this.didDrag) this.onAlbumClick?.(albums[i])
+        if (!this.didDrag) this.onAlbumClick?.(album)
       })
       this.labelLayer.appendChild(label)
       card.label = label
@@ -249,7 +250,7 @@ export class FanScene {
     cancelAnimationFrame(this.rafId)
     clearTimeout(this.checkTimer)
     this.observer?.disconnect()
-    this.renderer.domElement.removeEventListener('wheel', this.onWheel)
+    this.container.removeEventListener('wheel', this.onWheel)
     this.container.removeEventListener('pointerdown', this.onDown)
     window.removeEventListener('pointermove', this.onMove)
     window.removeEventListener('pointerup', this.onUp)
@@ -384,8 +385,9 @@ function albumPhotoCount(album: Album): number {
 }
 
 function albumCoverThumbUrl(album: Album): string {
-  if (album.cover_photo_id) {
-    return api.thumbUrl(album.id ?? album.name, { id: album.cover_photo_id, name: album.cover_photo_id })
+  const coverPhotoId = album.cover_photo_id
+  if (coverPhotoId) {
+    return api.thumbUrl(album.id ?? album.name, { id: coverPhotoId, name: coverPhotoId })
   }
 
   return api.thumbUrl(album.name, { id: 0, name: album.cover ?? '' })

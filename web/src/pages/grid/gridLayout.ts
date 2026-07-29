@@ -60,3 +60,16 @@ export function buildInfiniteGridItems(photos: Photo[], minItems: number): Infin
 
   return items
 }
+
+export interface GridRaycastHit {
+  object: { userData: Record<string, unknown> }
+}
+
+export function resolveGridHitSourceIndex(
+  hits: GridRaycastHit[],
+  items: InfiniteGridItem[],
+): number | null {
+  const itemIndex = hits[0]?.object.userData.gridItemIndex
+  if (typeof itemIndex !== 'number') return null
+  return items[itemIndex]?.sourceIndex ?? null
+}
