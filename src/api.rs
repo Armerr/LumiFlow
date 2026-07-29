@@ -88,8 +88,10 @@ pub async fn rescan(State(state): State<SharedState>) -> Json<serde_json::Value>
                     "found": report.scan.found,
                     "analyzed": report.scan.analyzed,
                     "reused": report.scan.reused,
+                    "errors": report.scan.errors,
                     "marked_missing": report.scan.marked_missing,
                     "albums_count": report.albums_count,
+                    "enrichment": report.enrichment,
                     "updated": chrono::Utc::now().to_rfc3339(),
                 })),
                 Err(error) => {

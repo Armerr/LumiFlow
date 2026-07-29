@@ -37,6 +37,7 @@ pub struct Config {
     pub timeline_timezone: String,
     pub calendar_region: String,
     pub place_provider: Option<String>,
+    pub place_base_url: Option<String>,
     pub vision_tagger: VisionTagger,
     pub vision_model_path: Option<PathBuf>,
     pub vision_labels_path: Option<PathBuf>,
@@ -57,7 +58,8 @@ impl Config {
             album_mode: parse_album_mode()?,
             timeline_timezone: non_empty_or("LUMIFLOW_TIMELINE_TIMEZONE", "Asia/Shanghai")?,
             calendar_region: non_empty_or("LUMIFLOW_CALENDAR_REGION", "CN_COMMON")?,
-            place_provider: parse_optional_provider("LUMIFLOW_PLACE_PROVIDER", &["nominatim"])?,
+            place_provider: parse_place_provider()?,
+            place_base_url: optional_string("LUMIFLOW_PLACE_BASE_URL"),
             vision_tagger: parse_vision_tagger()?,
             vision_model_path: optional_path("LUMIFLOW_VISION_MODEL_PATH"),
             vision_labels_path: optional_path("LUMIFLOW_VISION_LABELS_PATH"),
@@ -160,6 +162,18 @@ fn parse_optional_provider(key: &str, supported: &[&str]) -> anyhow::Result<Opti
     }
 }
 
+fn parse_place_provider() -> anyhow::Result<Option<String>> {
+    let provider = parse_optional_provider("LUMIFLOW_PLACE_PROVIDER", &["nominatim"])?;
+    if provider.as_deref() == Some("nominatim")
+        && optional_string("LUMIFLOW_PLACE_BASE_URL").is_none()
+    {
+        bail!(
+            "LUMIFLOW_PLACE_BASE_URL must be set and non-empty when LUMIFLOW_PLACE_PROVIDER=nominatim"
+        );
+    }
+    Ok(provider)
+}
+
 fn parse_ai_config() -> anyhow::Result<AiConfig> {
     let enabled = parse_or("LUMIFLOW_AI_ENABLED", false)?;
     let provider = optional_string("LUMIFLOW_AI_PROVIDER");
@@ -209,6 +223,7 @@ mod tests {
         "LUMIFLOW_TIMELINE_TIMEZONE",
         "LUMIFLOW_CALENDAR_REGION",
         "LUMIFLOW_PLACE_PROVIDER",
+        "LUMIFLOW_PLACE_BASE_URL",
         "LUMIFLOW_VISION_TAGGER",
         "LUMIFLOW_VISION_MODEL_PATH",
         "LUMIFLOW_VISION_LABELS_PATH",
@@ -279,6 +294,7 @@ mod tests {
         assert_eq!(config.timeline_timezone, "Asia/Shanghai");
         assert_eq!(config.calendar_region, "CN_COMMON");
         assert_eq!(config.place_provider, None);
+        assert_eq!(config.place_base_url, None);
         assert_eq!(config.vision_tagger, VisionTagger::None);
         assert_eq!(config.vision_model_path, None);
         assert_eq!(config.vision_labels_path, None);
@@ -300,6 +316,7 @@ mod tests {
         env::set_var("LUMIFLOW_TIMELINE_TIMEZONE", "Europe/Paris");
         env::set_var("LUMIFLOW_CALENDAR_REGION", "FR_COMMON");
         env::set_var("LUMIFLOW_PLACE_PROVIDER", "nominatim");
+        env::set_var("LUMIFLOW_PLACE_BASE_URL", "https://nominatim.example.test");
         env::set_var("LUMIFLOW_VISION_TAGGER", "onnx-mobileclip");
         env::set_var("LUMIFLOW_VISION_MODEL_PATH", "/models/mobileclip.onnx");
         env::set_var("LUMIFLOW_VISION_LABELS_PATH", "/models/labels.json");
@@ -316,6 +333,10 @@ mod tests {
         assert_eq!(config.timeline_timezone, "Europe/Paris");
         assert_eq!(config.calendar_region, "FR_COMMON");
         assert_eq!(config.place_provider.as_deref(), Some("nominatim"));
+        assert_eq!(
+            config.place_base_url.as_deref(),
+            Some("https://nominatim.example.test")
+        );
         assert_eq!(config.vision_tagger, VisionTagger::OnnxMobileClip);
         assert_eq!(
             config.vision_model_path.as_deref(),
@@ -335,6 +356,42 @@ mod tests {
         assert_eq!(config.ai.model.as_deref(), Some("vision-model"));
         assert_eq!(config.ai.language, "en-US");
     }
+    #[test]
+    fn nominatim_provider_requires_non_empty_base_url() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _snapshot = EnvSnapshot::capture(ENRICHMENT_ENV);
+        clear_env(ENRICHMENT_ENV);
+        set_required_paths();
+        env::set_var("LUMIFLOW_PLACE_PROVIDER", "nominatim");
+
+        let error = Config::from_env().expect_err("missing place base URL must fail");
+        assert!(error
+            .to_string()
+            .contains("LUMIFLOW_PLACE_BASE_URL must be set and non-empty when LUMIFLOW_PLACE_PROVIDER=nominatim"));
+
+        env::set_var("LUMIFLOW_PLACE_BASE_URL", "   ");
+        let error = Config::from_env().expect_err("blank place base URL must fail");
+        assert!(error
+            .to_string()
+            .contains("LUMIFLOW_PLACE_BASE_URL must be set and non-empty when LUMIFLOW_PLACE_PROVIDER=nominatim"));
+    }
+
+    #[test]
+    fn disabled_place_provider_keeps_base_url_without_enabling_network() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _snapshot = EnvSnapshot::capture(ENRICHMENT_ENV);
+        clear_env(ENRICHMENT_ENV);
+        set_required_paths();
+        env::set_var("LUMIFLOW_PLACE_BASE_URL", "https://nominatim.example.test");
+
+        let config = Config::from_env().expect("disabled place config");
+        assert_eq!(config.place_provider, None);
+        assert_eq!(
+            config.place_base_url.as_deref(),
+            Some("https://nominatim.example.test")
+        );
+    }
+
     #[test]
     fn enabled_ai_requires_non_empty_credentials() {
         let _guard = ENV_LOCK.lock().expect("env lock");

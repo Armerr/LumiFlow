@@ -1,6 +1,6 @@
 # LumiFlow
 
-LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它扫描只读照片根目录，把每个一级子目录作为一个相册，生成缓存的 WebP 缩略图，并通过单个 Rust 二进制提供 WebGL 相册界面。
+LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它既支持文件夹相册，也支持面向杂乱嵌套备份的可选 SQLite 时间线模式；程序生成缓存的 WebP 缩略图，并通过单个 Rust 二进制提供 WebGL 相册界面。原始照片目录始终只读。
 
 [English README](README.md)
 
@@ -9,6 +9,8 @@ LumiFlow 是一个面向本地/NAS 照片库的自托管相册服务。它扫描
 ## 功能
 
 - 按文件夹组织相册：照片根目录下的每个一级子目录就是一个相册。
+- 时间线相册：递归索引嵌套照片、解析拍摄时间，并按自然日稳定生成虚拟相册，不移动原图。
+- 可选本地 CPU 视觉标签，以及通过低分辨率 contact sheet 生成并缓存的相册描述。
 - WebGL 折扇式相册首页。
 - 可拖拽的无限照片网格相册页。
 - 照片详情页支持键盘、触摸和原图下载。
@@ -35,6 +37,14 @@ armerr/lumiflow:latest
 ```bash
 docker build -t lumiflow:local .
 ```
+
+默认镜像使用 glibc，且不包含 ONNX 代码或运行时资产，仍同时支持 `linux/amd64` 和 `linux/arm64`。如需本地视觉功能，可用同一份多架构 Dockerfile 启用 `vision-onnx`：
+
+```bash
+docker build --build-arg LUMIFLOW_CARGO_FEATURES=vision-onnx -t lumiflow:vision-onnx .
+```
+
+`ort` rc.13 会下载对应的 `x86_64-unknown-linux-gnu` 或 `aarch64-unknown-linux-gnu` CPU 归档，并把 ONNX Runtime 静态链接进 LumiFlow 可执行文件，因此运行时镜像不需要单独的 ONNX Runtime 共享库或动态加载路径配置。模型和标签向量文件仍需在运行时以只读方式显式挂载。
 
 ## Docker Compose 快速开始
 
@@ -116,6 +126,81 @@ services:
 | `LUMIFLOW_BUILDER_WORKERS` | `2` | 否 | 缩略图并发生成数量。小型 NAS 可以调低。 |
 | `LUMIFLOW_EXCLUDE_REGEX` | 内置 NAS/系统文件忽略正则 | 否 | 扫描时跳过的文件/目录正则。 |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | 否 | Rust 日志过滤规则。 |
+| `LUMIFLOW_ALBUM_MODE` | `folders` | 否 | `folders` 保留一级目录相册；`timeline` 递归扫描并在 SQLite 中生成每日虚拟相册。 |
+| `LUMIFLOW_TIMELINE_TIMEZONE` | `Asia/Shanghai` | 否 | 时间线按日分组使用的 IANA 时区。 |
+| `LUMIFLOW_CALENDAR_REGION` | `CN_COMMON` | 否 | 节日命名区域；首个版本支持 `CN_COMMON`。 |
+| `LUMIFLOW_PLACE_PROVIDER` | 无 | 否 | 可选逆地理编码服务。设为 `nominatim` 才会显式允许 GPS 查询；未设置时仅使用地点缓存和路径回退，不会通过网络发送 GPS 数据。 |
+| `LUMIFLOW_PLACE_BASE_URL` | 无 | Nominatim 必填 | Nominatim 兼容服务基础 URL；大型照片库建议使用自托管端点。也可使用 `https://nominatim.openstreetmap.org`（须遵守其使用政策）；若 URL 末尾没有 `/reverse`，LumiFlow 会自动追加。 |
+| `LUMIFLOW_VISION_TAGGER` | `none` | 否 | `none` 或 `onnx-mobileclip`；ONNX 需要启用 feature 的构建和显式本地资产。 |
+| `LUMIFLOW_VISION_MODEL_PATH` | 无 | ONNX 必填 | 本地 ONNX 图像编码器路径；LumiFlow 永不自动下载模型。 |
+| `LUMIFLOW_VISION_LABELS_PATH` | 无 | ONNX 必填 | 下文所述的本地标签/文本向量 JSON 路径。 |
+| `LUMIFLOW_VISION_WORKERS` | `1` | 否 | 正整数，ONNX CPU intra-op 线程数。 |
+| `LUMIFLOW_AI_ENABLED` | `false` | 否 | 在确定性相册创建完成后生成缓存描述。 |
+| `LUMIFLOW_AI_PROVIDER` | 无 | 否 | 如设置，必须为 `openai-compatible`；服务需实现 Responses API 图片输入 schema。 |
+| `LUMIFLOW_AI_BASE_URL` | 无 | AI 必填 | 例如 `https://api.openai.com/v1`，也可直接填写以 `/responses` 结尾的完整 URL。 |
+| `LUMIFLOW_AI_API_KEY` | 无 | AI 必填 | Bearer token；不会写入 SQLite 或日志。 |
+| `LUMIFLOW_AI_MODEL` | 无 | AI 必填 | 支持视觉输入的 Responses API 模型 ID。 |
+| `LUMIFLOW_AI_DESCRIPTION_LANGUAGE` | `zh-CN` | 否 | 相册描述语言。 |
+
+## 时间线相册与可选增强
+
+仅启用递归时间线相册，不启用可选增强：
+
+```yaml
+environment:
+  LUMIFLOW_ALBUM_MODE: timeline
+  LUMIFLOW_TIMELINE_TIMEZONE: Asia/Shanghai
+  LUMIFLOW_CALENDAR_REGION: CN_COMMON
+  LUMIFLOW_VISION_TAGGER: none
+  LUMIFLOW_AI_ENABLED: "false"
+```
+
+时间线元数据和每日相册成员关系存放在 `LUMIFLOW_DATA_PATH/lumiflow.sqlite`；按 ID 的 WebP 缩略图位于 `thumbs/by-id/`；AI contact sheet 及其指纹位于 `ai/contact-sheets/`。再次扫描会复用未变化的 EXIF、缩略图、本地标签、contact sheet 和 AI 描述。
+
+扫描、相册重建、缩略图、本地标签和 contact sheet 会在 rescan 响应前完成；远程 AI 请求随后在后台后处理任务中运行，因此缓慢或不可用的服务不会拖延启动、手动 rescan 或 watcher rescan。刷新相册列表即可看到新缓存的描述。
+
+本地视觉需要使用 `--features vision-onnx` 构建二进制，并挂载只读资产：
+
+```yaml
+volumes:
+  - /path/to/mobileclip-image-encoder.onnx:/models/mobileclip.onnx:ro
+  - /path/to/mobileclip-labels.json:/models/mobileclip-labels.json:ro
+environment:
+  LUMIFLOW_VISION_TAGGER: onnx-mobileclip
+  LUMIFLOW_VISION_MODEL_PATH: /models/mobileclip.onnx
+  LUMIFLOW_VISION_LABELS_PATH: /models/mobileclip-labels.json
+  LUMIFLOW_VISION_WORKERS: "1"
+```
+
+图像编码器必须只有一个 float32 `[1,3,N,N]` 输入，以及一个 float32 `[1,D]` 或 `[D]` 向量输出。标签文件采用严格 JSON：
+
+```json
+{
+  "version": 1,
+  "model_id": "mobileclip-s0-image-v1",
+  "tagset_version": "lumiflow-tags-v1",
+  "image_size": 224,
+  "mean": [0.0, 0.0, 0.0],
+  "std": [1.0, 1.0, 1.0],
+  "labels": [{"label": "family", "embedding": [0.1, 0.2]}]
+}
+```
+
+每个向量的实际维度必须与模型输出完全一致；上面的短向量仅用于说明 schema。
+
+可选 AI 配置：
+
+```yaml
+environment:
+  LUMIFLOW_AI_ENABLED: "true"
+  LUMIFLOW_AI_PROVIDER: openai-compatible
+  LUMIFLOW_AI_BASE_URL: https://api.openai.com/v1
+  LUMIFLOW_AI_API_KEY: ${LUMIFLOW_AI_API_KEY}
+  LUMIFLOW_AI_MODEL: gpt-5-mini
+  LUMIFLOW_AI_DESCRIPTION_LANGUAGE: zh-CN
+```
+
+隐私边界：本地标签只读取缓存缩略图，数据不离开设备。只有启用 AI 时，LumiFlow 才会向配置的服务发送一张低分辨率 contact sheet JPEG 和相册元数据，绝不上传原图。AI 不能改相册名称或成员关系。视觉、缩略图、contact sheet 或 AI 失败不会阻止确定性相册和原图访问；后续 rescan 会重试过期工作。
 
 ## 照片目录结构
 
@@ -128,7 +213,7 @@ services:
     └── IMG_0001.png
 ```
 
-只有照片根目录下的一级子目录会成为相册。直接放在根目录里的文件会被忽略。
+`folders` 模式只有一级子目录会成为相册，根目录照片会被忽略；`timeline` 模式会递归索引任意深度的受支持照片，也包括直接放在根目录中的照片。
 
 ## 从源码运行
 
@@ -165,6 +250,9 @@ http://127.0.0.1:4320
 | `GET /api/photos/:album/:file` | 原图，支持 Range。 |
 | `GET /api/photos/:album/:file?download=1` | 以附件形式下载原图。 |
 | `GET /api/exif/:album/:file` | EXIF 和文件元数据。 |
+| `GET /api/thumbs/by-id/:photo_id` | 按稳定照片 ID 获取时间线缩略图。 |
+| `GET /api/photos/by-id/:photo_id` | 按稳定照片 ID 获取时间线原图，支持 Range 和可选 `?download=1`。 |
+| `GET /api/exif/by-id/:photo_id` | 按稳定照片 ID 获取时间线 EXIF。 |
 | `POST /api/rescan` | 手动触发重新扫描。 |
 
 ## 支持的图片格式

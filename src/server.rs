@@ -398,6 +398,7 @@ mod tests {
             timeline_timezone: "Asia/Shanghai".into(),
             calendar_region: "CN_COMMON".into(),
             place_provider: None,
+            place_base_url: None,
             vision_tagger: crate::config::VisionTagger::None,
             vision_model_path: None,
             vision_labels_path: None,
@@ -687,7 +688,10 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["found"], 1);
         assert_eq!(json["analyzed"], 1);
+        assert_eq!(json["errors"], 0);
         assert_eq!(json["albums_count"], 1);
+        assert_eq!(json["enrichment"]["thumbnails_generated"], 0);
+        assert_eq!(json["enrichment"]["ai_errors"], 0);
     }
 
     #[tokio::test]

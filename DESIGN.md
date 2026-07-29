@@ -3,7 +3,7 @@
 ## 1. Overview
 
 LumiFlow is a self-hosted photo album web app deployed as a Docker container on a NAS.
-It reads a mounted photo directory (read-only), discovers albums from folder structure, and renders three WebGL-powered views:
+It reads a mounted photo directory read-only and supports two backend album modes: first-level folder albums and SQLite-backed timeline albums generated deterministically from recursive photo metadata. Both modes render the same three WebGL-powered views:
 
 | Page | Route | Description |
 |------|-------|-------------|
@@ -38,6 +38,9 @@ It reads a mounted photo directory (read-only), discovers albums from folder str
 | Config | `std::env` + `serde` | Env-var-driven runtime config. |
 | Logging | `tracing` + `tracing-subscriber` | Structured, filterable. |
 | Thumbnail worker pool | `tokio::task` | Bounded concurrent thumbnail generation. |
+| Timeline metadata | `rusqlite` + `chrono-tz` | Persistent recursive index, stable by-ID media, and deterministic local-day albums. |
+| Local vision | optional `ort` | CPU-only ONNX image embeddings against explicit local label vectors; absent from default builds. |
+| Album AI | `reqwest` | Optional Responses API client for contact-sheet descriptions after album membership is fixed. |
 
 **Why Rust over Go?**
 - `kamadak-exif`: pure-Rust EXIF parser with native HEIC support. Go has no equivalent — requires CGO or manual binary parsing.
@@ -62,10 +65,32 @@ It reads a mounted photo directory (read-only), discovers albums from folder str
 
 | Layer | Choice | Rationale |
 |-------|--------|-----------|
-| Container | Multi-stage Docker → `alpine:3.21` + `libheif` | Final image ~40 MB. |
-| Build stage | `rust:1.85-alpine` + `node:22-alpine` | Parallel frontend/backend builds. |
-| Volumes | `photos:/photos:ro`, `data:/data` | Photos read-only, thumbnails writable. |
+| Container | Multi-stage Docker → `debian:bookworm-slim` | glibc runtime available for both published architectures; runtime installs only CA certificates and timezone data. |
+| Build stages | `rust:1.88-bookworm` + `node:22-alpine` | The frontend remains architecture-neutral; the Rust builder emits GNU Linux binaries for the selected platform. |
+| Volumes | `photos:/photos:ro`, `data:/data` | Photos read-only, generated data writable. |
+| ONNX build | Disabled by default; `LUMIFLOW_CARGO_FEATURES=vision-onnx` opts in | `ort` rc.13 supplies CPU archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` and statically links `libonnxruntime.a`; model/tagset assets remain explicit read-only mounts. |
 | Entry | Cloudflare Tunnel (optional) | HTTPS via Cloudflare, no port forwarding. |
+
+
+## 2.1 Album modes and enrichment boundary
+
+- `folders` is the compatibility default: first-level directories and `manifest.json` remain the source of truth.
+- `timeline` recursively scans supported photos, persists stat/EXIF/GPS metadata in `lumiflow.sqlite`, buckets photos by configured local day, and serves originals/thumbnails/EXIF through stable photo IDs.
+- Original paths are never copied, moved, renamed, linked, or written.
+- Daily album identity, display name, ordering, membership, and cover are deterministic. Local vision and remote AI are post-processing only.
+- Local vision reads generated thumbnails, caches model/tagset/fingerprint results in SQLite, and never downloads assets or sends data off-device.
+- AI reads at most 36 representative thumbnails through one `224px`-cell JPEG contact sheet plus deterministic metadata. It returns description, keywords, and confidence only. It cannot return or override a title.
+- Failures are isolated: thumbnail/vision/contact-sheet/AI failures are counted and logged while albums and original serving remain available. A later rescan retries work whose fingerprint lacks a valid cache entry.
+
+Timeline generated data:
+
+```text
+LUMIFLOW_DATA_PATH/lumiflow.sqlite
+LUMIFLOW_DATA_PATH/thumbs/by-id/<photo_id>.webp
+LUMIFLOW_DATA_PATH/thumbs/by-id/<photo_id>.fingerprint
+LUMIFLOW_DATA_PATH/ai/contact-sheets/<sha1(album_id)>.jpg
+LUMIFLOW_DATA_PATH/ai/contact-sheets/<sha1(album_id)>.fingerprint
+```
 
 ## 3. Project Structure
 
@@ -164,7 +189,7 @@ GET  /api/exif/:album/:file
   All fields nullable; missing tags → null.
 
 POST /api/rescan
-  → Trigger immediate full rescan. Returns { status: "started" }.
+  → Run the immediate local scan/rebuild/enrichment pass and return counts; optional remote AI continues in a non-blocking background post-processing task.
 
 ```
 
@@ -443,26 +468,32 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# Stage 2: Rust build
-FROM rust:1.88-alpine AS backend
-RUN apk add --no-cache musl-dev libheif-dev
+# Stage 2: Rust build (glibc)
+FROM rust:1.88-bookworm AS backend
+ARG LUMIFLOW_CARGO_FEATURES=""
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
 COPY --from=frontend /build/dist ./web/dist/
-RUN cargo build --release --locked
+RUN cargo build --release --locked ${LUMIFLOW_CARGO_FEATURES:+--features "$LUMIFLOW_CARGO_FEATURES"}
 RUN strip target/release/lumiflow
 
 # Stage 3: Runtime
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata libheif
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /build/target/release/lumiflow /usr/local/bin/lumiflow
 EXPOSE 4320
 ENV LUMIFLOW_PORT=4320
+ENV LUMIFLOW_BIND_ADDRESS=0.0.0.0
 ENTRYPOINT ["lumiflow"]
 ```
 
-Final image: ~40 MB.
+The Dockerfile builds for both `linux/amd64` (`x86_64-unknown-linux-gnu`) and `linux/arm64` (`aarch64-unknown-linux-gnu`). The default feature set is empty and therefore downloads or packages no ONNX Runtime. With `LUMIFLOW_CARGO_FEATURES=vision-onnx`, `ort` rc.13 downloads the matching CPU archive and statically links `libonnxruntime.a` into the executable; there is no ONNX shared library to copy or configure in the runtime image.
 
 ### 7.2 docker-compose
 

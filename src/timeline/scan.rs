@@ -5,6 +5,7 @@ use crate::timeline::time::{resolve_taken_at, TimeInput};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use regex::Regex;
 use sha1::{Digest, Sha1};
 use std::ffi::OsStr;
 use std::fs::Metadata;
@@ -49,6 +50,17 @@ pub fn scan(
     timezone: Tz,
     analyzer: &impl Analyzer,
 ) -> Result<ScanReport> {
+    scan_with_exclude(root, db, timezone, analyzer, r"$^")
+}
+
+pub fn scan_with_exclude(
+    root: &Path,
+    db: &TimelineDb,
+    timezone: Tz,
+    analyzer: &impl Analyzer,
+    exclude_regex: &str,
+) -> Result<ScanReport> {
+    let exclude = Regex::new(exclude_regex).context("invalid exclude regex")?;
     let canonical_root = root
         .canonicalize()
         .with_context(|| format!("failed to resolve timeline root {}", root.display()))?;
@@ -60,19 +72,29 @@ pub fn scan(
 
     let scan_id = make_scan_id();
     let mut report = ScanReport::default();
-    let walker = WalkDir::new(&canonical_root)
+    let mut walker = WalkDir::new(&canonical_root)
         .follow_links(false)
         .sort_by_file_name()
-        .into_iter()
-        .filter_entry(should_descend);
+        .into_iter();
 
-    for result in walker {
+    while let Some(result) = walker.next() {
         let entry = result.with_context(|| {
             format!(
                 "incomplete timeline walk under {}",
                 canonical_root.display()
             )
         })?;
+        if entry.depth() == 0 {
+            continue;
+        }
+
+        let entry_relative_path = normalized_relative_path(&canonical_root, entry.path())?;
+        if is_excluded(&entry, &entry_relative_path, &exclude) {
+            if entry.file_type().is_dir() {
+                walker.skip_current_dir();
+            }
+            continue;
+        }
         if !entry.file_type().is_file() || !is_supported(entry.path()) {
             continue;
         }
@@ -96,15 +118,32 @@ pub fn scan(
         match db.upsert_candidate(&candidate)? {
             AnalysisDecision::Reuse => report.reused += 1,
             AnalysisDecision::Analyze => {
-                let analysis = analyzer.analyze(&canonical_path, &candidate.id, timezone)?;
-                anyhow::ensure!(
-                    analysis.id == candidate.id,
-                    "analyzer returned mismatched photo id `{}` for `{}`",
-                    analysis.id,
-                    candidate.id
-                );
-                db.save_analysis(&analysis)?;
-                report.analyzed += 1;
+                let analysis = analyzer
+                    .analyze(&canonical_path, &candidate.id, timezone)
+                    .and_then(|analysis| {
+                        anyhow::ensure!(
+                            analysis.id == candidate.id,
+                            "analyzer returned mismatched photo id `{}` for `{}`",
+                            analysis.id,
+                            candidate.id
+                        );
+                        Ok(analysis)
+                    });
+                match analysis {
+                    Ok(analysis) => {
+                        db.save_analysis(&analysis)?;
+                        report.analyzed += 1;
+                    }
+                    Err(error) => {
+                        db.mark_analysis_error(&candidate.id)?;
+                        report.errors += 1;
+                        tracing::warn!(
+                            photo = %relative_path,
+                            error = %format!("{error:#}"),
+                            "timeline photo analysis failed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -118,15 +157,20 @@ pub struct ScanReport {
     pub found: usize,
     pub analyzed: usize,
     pub reused: usize,
+    pub errors: usize,
     pub marked_missing: usize,
 }
 
-fn should_descend(entry: &DirEntry) -> bool {
-    entry.depth() == 0
-        || (!entry.file_type().is_symlink()
-            && !EXCLUDED_COMPONENTS
-                .iter()
-                .any(|excluded| entry.file_name() == OsStr::new(excluded)))
+fn is_excluded(entry: &DirEntry, relative_path: &str, exclude: &Regex) -> bool {
+    entry.file_type().is_symlink()
+        || EXCLUDED_COMPONENTS
+            .iter()
+            .any(|excluded| entry.file_name() == OsStr::new(excluded))
+        || exclude.is_match(relative_path)
+        || entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| exclude.is_match(name))
 }
 
 fn is_supported(path: &Path) -> bool {
@@ -402,6 +446,48 @@ mod tests {
         assert_eq!(active_paths(&db), ["album/keep.jpg"]);
     }
 
+    #[test]
+    fn configured_exclude_regex_matches_nested_paths_and_names() {
+        let root = TestDir::new();
+        root.write("album/keep.jpg", b"keep");
+        root.write("album/private/hidden.jpg", b"hidden directory");
+        root.write("album/nested/draft-photo.png", b"hidden file");
+        root.write("other/private-trip.jpg", b"hidden by name");
+        root.write("other/keep.png", b"keep too");
+        let db = TimelineDb::open_in_memory().expect("db");
+
+        let report = scan_with_exclude(
+            root.path(),
+            &db,
+            chrono_tz::UTC,
+            &CountingAnalyzer::default(),
+            r"(^|/)private(/|$)|(^|/)draft-|private-trip\.jpg$",
+        )
+        .expect("successful scan");
+
+        assert_eq!(report.found, 2);
+        assert_eq!(active_paths(&db), ["album/keep.jpg", "other/keep.png"]);
+    }
+
+    #[test]
+    fn invalid_configured_exclude_regex_aborts_before_scanning() {
+        let root = TestDir::new();
+        root.write("photo.jpg", b"photo");
+        let db = TimelineDb::open_in_memory().expect("db");
+
+        let error = scan_with_exclude(
+            root.path(),
+            &db,
+            chrono_tz::UTC,
+            &CountingAnalyzer::default(),
+            "(",
+        )
+        .expect_err("invalid regex");
+
+        assert!(error.to_string().contains("invalid exclude regex"));
+        assert!(active_paths(&db).is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn does_not_follow_symlink_directories() {
@@ -478,6 +564,58 @@ mod tests {
     }
 
     #[test]
+    fn analysis_failure_records_error_and_continues_with_later_files() {
+        let root = TestDir::new();
+        root.write("a-first.jpg", b"first");
+        root.write("b-fails.jpg", b"fails");
+        root.write("c-later.jpg", b"later");
+        let db = TimelineDb::open_in_memory().expect("db");
+        let successful = CountingAnalyzer::default();
+        let analyzer = FailOnNameAnalyzer {
+            inner: &successful,
+            filename: "b-fails.jpg",
+        };
+
+        let report = scan(root.path(), &db, chrono_tz::UTC, &analyzer).expect("completed scan");
+
+        assert_eq!(report.found, 3);
+        assert_eq!(report.analyzed, 2);
+        assert_eq!(report.errors, 1);
+        assert_eq!(successful.calls(), 2);
+        assert_eq!(active_paths(&db), ["a-first.jpg", "c-later.jpg"]);
+        let failed_id = sha1_hex(b"b-fails.jpg");
+        assert_eq!(
+            db.photo_status(&failed_id)
+                .expect("failed status")
+                .as_deref(),
+            Some("error")
+        );
+    }
+
+    #[test]
+    fn unchanged_failed_photo_retries_and_succeeds_on_next_scan() {
+        let root = TestDir::new();
+        root.write("photo.jpg", b"unchanged");
+        let db = TimelineDb::open_in_memory().expect("db");
+        let successful = CountingAnalyzer::default();
+        let failing = FailOnNameAnalyzer {
+            inner: &successful,
+            filename: "photo.jpg",
+        };
+
+        let first = scan(root.path(), &db, chrono_tz::UTC, &failing).expect("failed analysis scan");
+        let second = scan(root.path(), &db, chrono_tz::UTC, &successful).expect("retry scan");
+
+        assert_eq!(first.errors, 1);
+        assert_eq!(first.analyzed, 0);
+        assert_eq!(second.errors, 0);
+        assert_eq!(second.analyzed, 1);
+        assert_eq!(second.reused, 0);
+        assert_eq!(successful.calls(), 1);
+        assert_eq!(active_paths(&db), ["photo.jpg"]);
+    }
+
+    #[test]
     fn failed_root_scan_does_not_mark_existing_rows_missing() {
         let root = TestDir::new();
         root.write("photo.jpg", b"photo");
@@ -491,23 +629,28 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_scan_does_not_mark_unseen_rows_missing() {
+    fn completed_scan_marks_unseen_active_and_error_rows_missing() {
         let root = TestDir::new();
-        root.write("a-visible.jpg", b"visible");
-        root.write("z-later/hidden.jpg", b"hidden");
+        root.write("active.jpg", b"active");
+        root.write("error.jpg", b"error");
         let db = TimelineDb::open_in_memory().expect("db");
-        let analyzer = CountingAnalyzer::default();
-        scan(root.path(), &db, chrono_tz::UTC, &analyzer).expect("initial scan");
+        let successful = CountingAnalyzer::default();
+        scan(root.path(), &db, chrono_tz::UTC, &successful).expect("initial scan");
 
-        fs::remove_file(root.path().join("z-later/hidden.jpg")).expect("remove old photo");
-        root.write("m-fails.jpg", b"new photo");
+        fs::write(root.path().join("error.jpg"), b"changed error").expect("change error photo");
         let failing = FailOnNameAnalyzer {
-            inner: &analyzer,
-            filename: "m-fails.jpg",
+            inner: &successful,
+            filename: "error.jpg",
         };
+        let failed = scan(root.path(), &db, chrono_tz::UTC, &failing).expect("error scan");
+        assert_eq!(failed.errors, 1);
 
-        assert!(scan(root.path(), &db, chrono_tz::UTC, &failing).is_err());
-        assert_eq!(active_paths(&db).len(), 3);
+        fs::remove_file(root.path().join("active.jpg")).expect("remove active photo");
+        fs::remove_file(root.path().join("error.jpg")).expect("remove error photo");
+        let completed = scan(root.path(), &db, chrono_tz::UTC, &successful).expect("empty scan");
+
+        assert_eq!(completed.marked_missing, 2);
+        assert!(active_paths(&db).is_empty());
     }
 
     #[test]

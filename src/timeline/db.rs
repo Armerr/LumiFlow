@@ -202,15 +202,17 @@ impl TimelineDb {
         let size_bytes =
             i64::try_from(candidate.size_bytes).context("photo size exceeds SQLite")?;
         self.with_transaction(|transaction| {
-            let existing_fingerprint = transaction
+            let existing = transaction
                 .query_row(
-                    "SELECT fingerprint FROM photos WHERE id = ?1",
+                    "SELECT fingerprint, status FROM photos WHERE id = ?1",
                     [&candidate.id],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()?;
-            let decision = match existing_fingerprint.as_deref() {
-                Some(fingerprint) if fingerprint == candidate.fingerprint => {
+            let decision = match existing.as_ref() {
+                Some((fingerprint, status))
+                    if fingerprint == &candidate.fingerprint && status == "active" =>
+                {
                     AnalysisDecision::Reuse
                 }
                 _ => AnalysisDecision::Analyze,
@@ -228,7 +230,11 @@ impl TimelineDb {
                     size_bytes = excluded.size_bytes,
                     mtime_ns = excluded.mtime_ns,
                     fingerprint = excluded.fingerprint,
-                    status = 'active',
+                    status = CASE
+                        WHEN photos.fingerprint = excluded.fingerprint
+                            AND photos.status = 'error' THEN 'error'
+                        ELSE 'active'
+                    END,
                     last_scan_id = excluded.last_scan_id,
                     updated_at = CURRENT_TIMESTAMP",
                 params![
@@ -286,12 +292,25 @@ impl TimelineDb {
         })
     }
 
+    pub fn mark_analysis_error(&self, photo_id: &str) -> Result<()> {
+        self.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE photos
+                 SET status = 'error', updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                [photo_id],
+            )?;
+            anyhow::ensure!(changed == 1, "photo `{photo_id}` does not exist");
+            Ok(())
+        })
+    }
+
     pub fn mark_missing_except(&self, scan_id: &str) -> Result<usize> {
         self.with_connection(|connection| {
             Ok(connection.execute(
                 "UPDATE photos
                  SET status = 'missing', updated_at = CURRENT_TIMESTAMP
-                 WHERE status = 'active' AND last_scan_id <> ?1",
+                 WHERE status IN ('active', 'error') AND last_scan_id <> ?1",
                 [scan_id],
             )?)
         })
@@ -391,10 +410,24 @@ impl TimelineDb {
         })
     }
 
+    pub fn list_active_photo_cameras(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, camera_make, camera_model FROM photos WHERE status = 'active'",
+            )?;
+            let cameras = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(cameras)
+        })
+    }
+
     pub fn list_albums(&self) -> Result<Vec<TimelineAlbum>> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT a.id, a.display_name, d.description, a.date_start, a.date_end,
+                "SELECT a.id, a.display_name, NULLIF(d.description, ''), a.date_start, a.date_end,
                         a.place_name, a.holiday_name, a.photo_count, a.cover_photo_id
                  FROM albums a
                  LEFT JOIN album_ai_descriptions d ON d.album_id = a.id
@@ -411,7 +444,7 @@ impl TimelineDb {
         self.with_connection(|connection| {
             let album = connection
                 .query_row(
-                    "SELECT a.id, a.display_name, d.description, a.date_start, a.date_end,
+                    "SELECT a.id, a.display_name, NULLIF(d.description, ''), a.date_start, a.date_end,
                             a.place_name, a.holiday_name, a.photo_count, a.cover_photo_id
                      FROM albums a
                      LEFT JOIN album_ai_descriptions d ON d.album_id = a.id
@@ -496,6 +529,28 @@ impl TimelineDb {
         })
     }
 
+    pub fn save_vision_error(&self, failed: &VisionTags) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO photo_vision_tags (
+                    photo_id, model, input_fingerprint, labels_json, scores_json, analyzed_at, error
+                 ) VALUES (?1, ?2, ?3, '[]', '[]', ?4, ?5)
+                 ON CONFLICT(photo_id, model) DO UPDATE SET
+                    input_fingerprint = excluded.input_fingerprint,
+                    analyzed_at = excluded.analyzed_at,
+                    error = excluded.error",
+                params![
+                    failed.photo_id,
+                    failed.model,
+                    failed.input_fingerprint,
+                    failed.analyzed_at,
+                    failed.error,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn get_vision_tags(&self, photo_id: &str, model: &str) -> Result<Option<VisionTags>> {
         self.with_connection(|connection| {
             let raw = connection
@@ -554,6 +609,30 @@ impl TimelineDb {
                     description.confidence,
                     description.generated_at,
                     description.error,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn save_ai_error(&self, failed: &AlbumAiDescription) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO album_ai_descriptions (
+                    album_id, input_fingerprint, model, description, keywords_json,
+                    confidence, generated_at, error
+                 ) VALUES (?1, ?2, ?3, '', '[]', 0.0, ?4, ?5)
+                 ON CONFLICT(album_id) DO UPDATE SET
+                    input_fingerprint = excluded.input_fingerprint,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    error = excluded.error",
+                params![
+                    failed.album_id,
+                    failed.input_fingerprint,
+                    failed.model,
+                    failed.generated_at,
+                    failed.error,
                 ],
             )?;
             Ok(())
@@ -665,6 +744,19 @@ impl TimelineDb {
     }
 
     #[cfg(test)]
+    pub(crate) fn photo_status(&self, photo_id: &str) -> Result<Option<String>> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT status FROM photos WHERE id = ?1",
+                    [photo_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    #[cfg(test)]
     fn has_table(&self, table: &str) -> Result<bool> {
         self.with_connection(|connection| {
             Ok(connection
@@ -679,7 +771,7 @@ impl TimelineDb {
     }
 
     #[cfg(test)]
-    fn last_scan_id(&self, photo_id: &str) -> Result<Option<String>> {
+    pub(crate) fn last_scan_id(&self, photo_id: &str) -> Result<Option<String>> {
         self.with_connection(|connection| {
             Ok(connection
                 .query_row(
@@ -798,6 +890,28 @@ mod tests {
         }
     }
 
+    fn photo_status(db: &TimelineDb, id: &str) -> String {
+        db.with_connection(|connection| {
+            Ok(
+                connection.query_row("SELECT status FROM photos WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })?,
+            )
+        })
+        .expect("photo status")
+    }
+
+    fn set_photo_status(db: &TimelineDb, id: &str, status: &str) {
+        db.with_connection(|connection| {
+            connection.execute(
+                "UPDATE photos SET status = ?2 WHERE id = ?1",
+                params![id, status],
+            )?;
+            Ok(())
+        })
+        .expect("set photo status");
+    }
+
     fn analyzed_candidate(
         db: &TimelineDb,
         id: &str,
@@ -900,16 +1014,41 @@ mod tests {
     }
 
     #[test]
-    fn mark_missing_except_marks_only_photos_unseen_in_scan() {
+    fn errored_candidate_retries_an_unchanged_fingerprint() {
+        let db = TimelineDb::open_in_memory().expect("db");
+        let first = candidate("photo-1", "fp-1", "scan-1");
+        db.upsert_candidate(&first).expect("first upsert");
+        set_photo_status(&db, "photo-1", "error");
+
+        let mut retry = first;
+        retry.scan_id = "scan-2".into();
+
+        assert_eq!(
+            db.upsert_candidate(&retry).expect("retry upsert"),
+            AnalysisDecision::Analyze
+        );
+        assert_eq!(photo_status(&db, "photo-1"), "error");
+        assert_eq!(
+            db.last_scan_id("photo-1").expect("scan lookup").as_deref(),
+            Some("scan-2")
+        );
+    }
+
+    #[test]
+    fn mark_missing_except_marks_unseen_active_and_error_photos() {
         let db = TimelineDb::open_in_memory().expect("db");
         db.upsert_candidate(&candidate("seen", "fp-seen", "scan-2"))
             .expect("seen upsert");
-        db.upsert_candidate(&candidate("unseen", "fp-unseen", "scan-1"))
-            .expect("unseen upsert");
+        db.upsert_candidate(&candidate("active-unseen", "fp-active", "scan-1"))
+            .expect("active unseen upsert");
+        db.upsert_candidate(&candidate("error-unseen", "fp-error", "scan-1"))
+            .expect("error unseen upsert");
+        set_photo_status(&db, "error-unseen", "error");
 
-        assert_eq!(db.mark_missing_except("scan-2").expect("mark missing"), 1);
-        assert!(db.get_photo("seen").expect("seen lookup").is_some());
-        assert!(db.get_photo("unseen").expect("unseen lookup").is_none());
+        assert_eq!(db.mark_missing_except("scan-2").expect("mark missing"), 2);
+        assert_eq!(photo_status(&db, "seen"), "active");
+        assert_eq!(photo_status(&db, "active-unseen"), "missing");
+        assert_eq!(photo_status(&db, "error-unseen"), "missing");
     }
 
     #[test]
@@ -1110,6 +1249,45 @@ mod tests {
         assert_eq!(
             db.list_albums().expect("albums")[0].description.as_deref(),
             Some("A family meal.")
+        );
+    }
+
+    #[test]
+    fn first_ai_failure_is_not_exposed_as_an_empty_description() {
+        let db = TimelineDb::open_in_memory().expect("db");
+        analyzed_candidate(
+            &db,
+            "photo",
+            "fp-photo",
+            "scan-1",
+            "2024-02-10T09:00:00+08:00",
+        );
+        db.replace_daily_albums(&[album(
+            "auto-day:2024-02-10",
+            NaiveDate::from_ymd_opt(2024, 2, 10).unwrap(),
+            &["photo"],
+        )])
+        .expect("album build");
+        db.save_ai_error(&AlbumAiDescription {
+            album_id: "auto-day:2024-02-10".into(),
+            input_fingerprint: "failed-fp".into(),
+            model: "failed-model".into(),
+            description: String::new(),
+            keywords: Vec::new(),
+            confidence: 0.0,
+            generated_at: "2024-02-10T12:30:00Z".into(),
+            error: Some("provider unavailable".into()),
+        })
+        .expect("save failure");
+
+        assert_eq!(db.list_albums().expect("albums")[0].description, None);
+        assert_eq!(
+            db.get_album("auto-day:2024-02-10")
+                .expect("album query")
+                .expect("album")
+                .album
+                .description,
+            None
         );
     }
     #[test]

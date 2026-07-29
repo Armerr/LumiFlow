@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 pub fn rebuild_daily_albums(
     db: &TimelineDb,
     timezone: Tz,
-    places: &impl PlaceResolver,
+    places: &(impl PlaceResolver + ?Sized),
 ) -> Result<Vec<DailyAlbumBuild>> {
     let photos = db.list_active_photos()?;
     let builds = build_daily_albums(&photos, timezone, places)?;
@@ -22,7 +22,7 @@ pub fn rebuild_daily_albums(
 pub fn build_daily_albums(
     photos: &[TimelinePhoto],
     timezone: Tz,
-    places: &impl PlaceResolver,
+    places: &(impl PlaceResolver + ?Sized),
 ) -> Result<Vec<DailyAlbumBuild>> {
     let mut days: BTreeMap<
         Option<chrono::NaiveDate>,
