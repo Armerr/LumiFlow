@@ -111,7 +111,8 @@ services:
       LUMIFLOW_DATA_PATH: /data
       LUMIFLOW_BIND_ADDRESS: 0.0.0.0
       LUMIFLOW_PORT: 4320
-      LUMIFLOW_BUILDER_WORKERS: "2"
+      LUMIFLOW_BUILDER_WORKERS: "1"
+      LUMIFLOW_SCAN_WORKERS: "4"
       RUST_LOG: lumiflow=info,tower_http=warn
 ```
 
@@ -124,6 +125,7 @@ services:
 | `LUMIFLOW_BIND_ADDRESS` | `0.0.0.0` | 否 | Rust 服务监听地址。Docker 应保持 `0.0.0.0`。 |
 | `LUMIFLOW_PORT` | `4320` | 否 | Rust 服务监听端口。 |
 | `LUMIFLOW_BUILDER_WORKERS` | `1` | 否 | 按需生成缩略图时允许的最大并发解码数。仅在主机内存足够时调高。 |
+| `LUMIFLOW_SCAN_WORKERS` | CPU 核数并限制在 `2..4` | 否 | 扫描照片时并发读取 EXIF/元数据的线程数。一般 NAS 推荐 `4`；若磁盘延迟或 CPU 竞争明显可调低。 |
 | `LUMIFLOW_EXCLUDE_REGEX` | 内置 NAS/系统文件忽略正则 | 否 | 扫描时跳过的文件/目录正则。 |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | 否 | Rust 日志过滤规则。 |
 | `LUMIFLOW_ALBUM_MODE` | `timeline` | 否 | `timeline` 默认递归扫描并写入 SQLite，同时保留一级文件夹边界；只有显式设为 `folders` 才使用旧的一级目录相册模式。 |

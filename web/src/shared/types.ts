@@ -21,6 +21,17 @@ export interface AlbumsResponse {
   updated: string
 }
 
+export interface ScanStatus {
+  state: 'starting' | 'scanning' | 'ready' | 'error'
+  phase: string
+  found: number
+  processed: number
+  errors: number
+  workers: number
+  elapsed_seconds: number
+  error?: string | null
+}
+
 export interface Photo {
   id: number | string
   name: string

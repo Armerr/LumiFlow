@@ -57,6 +57,17 @@ describe('EXIF URL contracts', () => {
   })
 })
 
+describe('startup status', () => {
+  test('fetches live initial scan status', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ state: 'scanning', phase: 'indexing', found: 125, processed: 120, errors: 1, elapsed_seconds: 3 }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.status()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/status')
+  })
+})
+
 describe('album pagination', () => {
   test('fetches only the requested vertical-grid page', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ name: 'Trip', photo_count: 4750, photos: [] }) })

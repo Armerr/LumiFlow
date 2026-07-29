@@ -32,6 +32,7 @@ pub struct Config {
     pub bind_address: String,
     pub port: u16,
     pub builder_workers: usize,
+    pub scan_workers: usize,
     pub exclude_regex: String,
     pub album_mode: AlbumMode,
     pub timeline_timezone: String,
@@ -53,6 +54,7 @@ impl Config {
             bind_address: env::var("LUMIFLOW_BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0".into()),
             port: parse_or("LUMIFLOW_PORT", 4320)?,
             builder_workers: parse_or("LUMIFLOW_BUILDER_WORKERS", 1)?,
+            scan_workers: parse_positive_or("LUMIFLOW_SCAN_WORKERS", default_scan_workers())?,
             exclude_regex: env::var("LUMIFLOW_EXCLUDE_REGEX")
                 .unwrap_or_else(|_| r"(^|/)(@eaDir|#recycle|\.DS_Store|Thumbs\.db)(/|$)".into()),
             album_mode: parse_album_mode()?,
@@ -109,6 +111,13 @@ where
         Err(env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("failed to read {key}")),
     }
+}
+
+fn default_scan_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .clamp(2, 4)
 }
 
 fn parse_positive_or(key: &str, default: usize) -> anyhow::Result<usize> {
@@ -219,6 +228,7 @@ mod tests {
         "LUMIFLOW_PHOTOS_PATH",
         "LUMIFLOW_DATA_PATH",
         "LUMIFLOW_PORT",
+        "LUMIFLOW_SCAN_WORKERS",
         "LUMIFLOW_ALBUM_MODE",
         "LUMIFLOW_TIMELINE_TIMEZONE",
         "LUMIFLOW_CALENDAR_REGION",
@@ -292,6 +302,7 @@ mod tests {
         assert_eq!(config.port, 4320);
         assert_eq!(config.album_mode, AlbumMode::Timeline);
         assert_eq!(config.builder_workers, 1);
+        assert!((2..=4).contains(&config.scan_workers));
         assert_eq!(config.timeline_timezone, "Asia/Shanghai");
         assert_eq!(config.calendar_region, "CN_COMMON");
         assert_eq!(config.place_provider, None);

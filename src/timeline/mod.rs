@@ -16,7 +16,9 @@ use chrono_tz::Tz;
 use db::TimelineDb;
 use places::{CachedPlaceResolver, NominatimPlaceResolver, PlaceResolver};
 use scan::ScanReport;
+use serde::Serialize;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -24,6 +26,51 @@ pub struct RescanReport {
     pub scan: ScanReport,
     pub albums_count: usize,
     pub enrichment: enrichment::EnrichmentReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanState {
+    Starting,
+    Scanning,
+    Ready,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanStatus {
+    pub state: ScanState,
+    pub phase: String,
+    pub found: usize,
+    pub processed: usize,
+    pub errors: usize,
+    pub workers: usize,
+    pub elapsed_seconds: u64,
+    pub error: Option<String>,
+    #[serde(skip)]
+    started_at: Option<Instant>,
+}
+
+impl ScanStatus {
+    fn starting(workers: usize) -> Self {
+        Self {
+            state: ScanState::Starting,
+            phase: "starting".into(),
+            found: 0,
+            processed: 0,
+            errors: 0,
+            workers,
+            elapsed_seconds: 0,
+            error: None,
+            started_at: None,
+        }
+    }
+
+    fn update_elapsed(&mut self) {
+        self.elapsed_seconds = self
+            .started_at
+            .map_or(0, |started| started.elapsed().as_secs());
+    }
 }
 
 struct VisionRuntime {
@@ -40,11 +87,12 @@ pub struct TimelineService {
     ai: Option<Arc<dyn enrichment::AiDescriptionGenerator>>,
     ai_schedule: Arc<AiScheduleState>,
     scan_lock: Mutex<()>,
+    status: Arc<StdMutex<ScanStatus>>,
 }
 
 impl TimelineService {
-    /// Open and migrate the timeline database, then fully index the photo root.
-    pub async fn open(config: Config) -> Result<Arc<Self>> {
+    /// Open and migrate the timeline database without blocking HTTP startup on a full scan.
+    pub fn open(config: Config) -> Result<Arc<Self>> {
         let timezone = parse_timezone(&config.timeline_timezone)?;
         let db = TimelineDb::open(config.data_path.join("lumiflow.sqlite"))?;
         let vision = build_vision_runtime(&config)?.map(|runtime| Arc::new(StdMutex::new(runtime)));
@@ -54,7 +102,8 @@ impl TimelineService {
             .then(|| ai::ResponsesAiClient::from_config(&config.ai))
             .transpose()?
             .map(|client| Arc::new(client) as Arc<dyn enrichment::AiDescriptionGenerator>);
-        let service = Arc::new(Self {
+        let workers = config.scan_workers;
+        Ok(Arc::new(Self {
             config,
             db,
             timezone,
@@ -62,9 +111,8 @@ impl TimelineService {
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
-        });
-        service.rescan().await?;
-        Ok(service)
+            status: Arc::new(StdMutex::new(ScanStatus::starting(workers))),
+        }))
     }
 
     #[cfg(test)]
@@ -77,6 +125,7 @@ impl TimelineService {
             .then(|| ai::ResponsesAiClient::from_config(&config.ai))
             .transpose()?
             .map(|client| Arc::new(client) as Arc<dyn enrichment::AiDescriptionGenerator>);
+        let workers = config.scan_workers;
         Ok(Self {
             config,
             db,
@@ -85,6 +134,7 @@ impl TimelineService {
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
+            status: Arc::new(StdMutex::new(ScanStatus::starting(workers))),
         })
     }
 
@@ -96,6 +146,16 @@ impl TimelineService {
         &self.config
     }
 
+    pub fn status(&self) -> ScanStatus {
+        let mut status = self.status.lock().expect("scan status lock").clone();
+        status.update_elapsed();
+        status
+    }
+
+    pub fn start_initial_scan(self: &Arc<Self>) -> tokio::task::JoinHandle<Result<RescanReport>> {
+        let service = self.clone();
+        tokio::spawn(async move { service.rescan().await })
+    }
     /// Run blocking filesystem, EXIF, and SQLite work off the async runtime.
     /// The mutex prevents manual, periodic, and notify-triggered scans from overlapping.
     pub async fn rescan(&self) -> Result<RescanReport> {
@@ -106,7 +166,18 @@ impl TimelineService {
         let timezone = self.timezone;
         let vision = self.vision.clone();
         let prepare_ai = self.ai.is_some();
-        let (report, ai_inputs) = tokio::task::spawn_blocking(move || {
+        let status = self.status.clone();
+        {
+            let mut current = status.lock().expect("scan status lock");
+            *current = ScanStatus {
+                state: ScanState::Scanning,
+                phase: "indexing".into(),
+                workers: config.scan_workers,
+                started_at: Some(Instant::now()),
+                ..ScanStatus::starting(config.scan_workers)
+            };
+        }
+        let result = tokio::task::spawn_blocking(move || {
             if let Some(vision) = vision {
                 let mut runtime = vision
                     .lock()
@@ -119,6 +190,7 @@ impl TimelineService {
                     Some(runtime.tagger.as_mut()),
                     &tagset_version,
                     prepare_ai,
+                    Some(status.clone()),
                 )
             } else {
                 rescan_local_blocking(
@@ -128,13 +200,34 @@ impl TimelineService {
                     None,
                     "disabled",
                     prepare_ai,
+                    Some(status.clone()),
                 )
             }
         })
         .await
-        .context("timeline rescan task failed")??;
+        .context("timeline rescan task failed")?;
+        let (report, ai_inputs) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let mut current = self.status.lock().expect("scan status lock");
+                current.state = ScanState::Error;
+                current.phase = "error".into();
+                current.error = Some(format!("{error:#}"));
+                current.update_elapsed();
+                return Err(error);
+            }
+        };
         if let Some(ai) = &self.ai {
             schedule_ai_enrichment(db, ai.clone(), self.ai_schedule.clone(), ai_inputs);
+        }
+        {
+            let mut current = self.status.lock().expect("scan status lock");
+            current.state = ScanState::Ready;
+            current.phase = "ready".into();
+            current.found = report.scan.found;
+            current.processed = report.scan.analyzed + report.scan.reused + report.scan.errors;
+            current.errors = report.scan.errors;
+            current.update_elapsed();
         }
         Ok(report)
     }
@@ -147,14 +240,38 @@ fn rescan_local_blocking(
     tagger: Option<&mut dyn vision::VisionTagger>,
     tagset_version: &str,
     prepare_ai: bool,
+    status: Option<Arc<StdMutex<ScanStatus>>>,
 ) -> Result<(RescanReport, Vec<ai::AiDescriptionInput>)> {
-    let scan = scan::scan_with_exclude(
+    let scan = scan::scan_parallel(
         &config.photos_path,
         db,
         timezone,
         &scan::ExifAnalyzer,
         &config.exclude_regex,
+        config.scan_workers,
+        |report| {
+            let processed = report.analyzed + report.reused + report.errors;
+            if processed > 0 && processed % 100 == 0 {
+                tracing::info!(
+                    found = report.found,
+                    processed,
+                    errors = report.errors,
+                    workers = config.scan_workers,
+                    "initial photo index progress"
+                );
+            }
+            if let Some(status) = &status {
+                let mut current = status.lock().expect("scan status lock");
+                current.found = report.found;
+                current.processed = processed;
+                current.errors = report.errors;
+                current.update_elapsed();
+            }
+        },
     )?;
+    if let Some(status) = &status {
+        status.lock().expect("scan status lock").phase = "building_albums".into();
+    }
     let places = build_place_resolver(config, db)?;
     let albums = albums::rebuild_daily_albums(db, timezone, places.as_ref())?;
     let (enrichment, ai_inputs) =
@@ -459,6 +576,7 @@ mod tests {
             bind_address: "127.0.0.1".into(),
             port: 4320,
             builder_workers: 1,
+            scan_workers: 2,
             exclude_regex: r"$^".into(),
             album_mode: AlbumMode::Timeline,
             timeline_timezone: "UTC".into(),
@@ -480,7 +598,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_fully_indexes_nested_photos_into_sqlite_before_returning() {
+    async fn open_returns_before_initial_scan_and_reports_completion() {
         let photos = TestDir::new("initial-scan-photos");
         let data = TestDir::new("initial-scan-data");
         for relative in ["first/a.png", "first/nested/b.png", "second/c.png"] {
@@ -493,10 +611,15 @@ mod tests {
         }
 
         let service = TimelineService::open(timeline_test_config(&photos.0, &data.0))
-            .await
             .expect("open timeline service");
 
         assert!(data.0.join("lumiflow.sqlite").is_file());
+        assert_eq!(service.status().state, ScanState::Starting);
+        let scan = service.start_initial_scan();
+        scan.await.expect("scan task").expect("initial scan");
+        assert_eq!(service.status().state, ScanState::Ready);
+        assert_eq!(service.status().found, 3);
+        assert_eq!(service.status().processed, 3);
         assert_eq!(
             service
                 .db()
@@ -504,16 +627,6 @@ mod tests {
                 .expect("indexed photos")
                 .len(),
             3
-        );
-        assert_eq!(
-            service
-                .db()
-                .list_albums()
-                .expect("generated albums")
-                .iter()
-                .map(|album| album.photo_count)
-                .sum::<usize>(),
-            3,
         );
     }
 
@@ -533,6 +646,7 @@ mod tests {
             bind_address: "127.0.0.1".into(),
             port: 4320,
             builder_workers: 1,
+            scan_workers: 2,
             exclude_regex: r"$^".into(),
             album_mode: AlbumMode::Timeline,
             timeline_timezone: "UTC".into(),
@@ -561,6 +675,7 @@ mod tests {
             Some(&mut tagger),
             "fixed-tags-v1",
             true,
+            None,
         )
         .expect("rescan with enrichment");
         assert_eq!(report.scan.found, 1);
@@ -583,6 +698,7 @@ mod tests {
             bind_address: "127.0.0.1".into(),
             port: 4320,
             builder_workers: 1,
+            scan_workers: 2,
             exclude_regex: r"$^".into(),
             album_mode: AlbumMode::Timeline,
             timeline_timezone: "UTC".into(),

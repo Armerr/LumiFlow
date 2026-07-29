@@ -684,6 +684,7 @@ mod tests {
             bind_address: "127.0.0.1".into(),
             port: 4320,
             builder_workers: 1,
+            scan_workers: 2,
             exclude_regex: String::new(),
             album_mode: AlbumMode::Timeline,
             timeline_timezone: "UTC".into(),

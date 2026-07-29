@@ -111,7 +111,8 @@ services:
       LUMIFLOW_DATA_PATH: /data
       LUMIFLOW_BIND_ADDRESS: 0.0.0.0
       LUMIFLOW_PORT: 4320
-      LUMIFLOW_BUILDER_WORKERS: "2"
+      LUMIFLOW_BUILDER_WORKERS: "1"
+      LUMIFLOW_SCAN_WORKERS: "4"
       RUST_LOG: lumiflow=info,tower_http=warn
 ```
 
@@ -124,6 +125,7 @@ services:
 | `LUMIFLOW_BIND_ADDRESS` | `0.0.0.0` | no | Address the Rust server binds to. Docker should keep `0.0.0.0`. |
 | `LUMIFLOW_PORT` | `4320` | no | Rust server port. |
 | `LUMIFLOW_BUILDER_WORKERS` | `1` | no | Maximum concurrent on-demand thumbnail decodes. Raise it only when the host has sufficient memory. |
+| `LUMIFLOW_SCAN_WORKERS` | CPU count clamped to `2..4` | no | Concurrent EXIF/metadata analysis workers during library scans. Use `4` on a typical NAS; lower it if storage latency or CPU contention is high. |
 | `LUMIFLOW_EXCLUDE_REGEX` | built-in NAS/system-file ignore regex | no | Regex for files/directories skipped during scans. |
 | `RUST_LOG` | `lumiflow=info,tower_http=warn` | no | Rust log filter. |
 | `LUMIFLOW_ALBUM_MODE` | `timeline` | no | `timeline` recursively indexes photos into SQLite while preserving first-level folder boundaries; set `folders` explicitly for legacy first-level directory albums. |

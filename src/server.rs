@@ -55,9 +55,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         }
         AlbumMode::Timeline => {
             let service = crate::timeline::TimelineService::open(config.clone())
-                .await
-                .context("initial timeline scan failed")?;
-            crate::scanner::watcher::start_timeline(config.photos_path.clone(), service.clone());
+                .context("failed to initialize timeline database")?;
             (None, Some(service))
         }
     };
@@ -69,6 +67,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         exclude,
         thumbnails: pool,
     });
+    if let Some(service) = &state.timeline {
+        service.start_initial_scan();
+        crate::scanner::watcher::start_timeline(config.photos_path.clone(), service.clone());
+    }
     let app = build_router(state);
     let addr = format!("{}:{}", config.bind_address, config.port);
     tracing::info!("listening on {addr}");
@@ -88,6 +90,7 @@ fn build_router(state: SharedState) -> Router {
     Router::new()
         // API routes
         .route("/api/albums", get(api::list_albums))
+        .route("/api/status", get(api::status))
         .route("/api/albums/{name}", get(api::get_album))
         .route("/api/rescan", get(api::rescan).post(api::rescan))
         .route("/api/thumbs/by-id/{id}", get(api::serve_thumbnail_by_id))
@@ -388,6 +391,7 @@ mod tests {
             bind_address: "127.0.0.1".into(),
             port: 4320,
             builder_workers: 1,
+            scan_workers: 2,
             exclude_regex: r"$^".into(),
             album_mode: crate::config::AlbumMode::Folders,
             timeline_timezone: "Asia/Shanghai".into(),
@@ -597,6 +601,37 @@ mod tests {
             serde_json::from_slice(&response_bytes(rescan).await).expect("rescan json");
         assert_eq!(rescan_json["status"], "ok");
         assert_eq!(rescan_json["albums_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_is_available_before_timeline_scan_runs() {
+        let photos = TestDir::new("timeline-status-photos");
+        let data = TestDir::new("timeline-status-data");
+        let config = timeline_config(photos.path(), data.path());
+        let service =
+            crate::timeline::TimelineService::open(config.clone()).expect("open timeline service");
+        let state = Arc::new(api::AppState {
+            config: config.clone(),
+            manifest: None,
+            timeline: Some(service),
+            exclude: Regex::new(r"$^").expect("test regex"),
+            thumbnails: ThumbnailPool::new(&config),
+        });
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&response_bytes(response).await).expect("status json");
+        assert_eq!(json["state"], "starting");
+        assert_eq!(json["found"], 0);
     }
 
     #[tokio::test]

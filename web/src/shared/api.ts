@@ -1,4 +1,4 @@
-import type { AlbumsResponse, AlbumDetail, ExifData, Photo } from './types'
+import type { AlbumsResponse, AlbumDetail, ExifData, Photo, ScanStatus } from './types'
 
 const BASE = ''
 
@@ -17,6 +17,11 @@ function mediaUrl(kind: 'exif' | 'thumbs' | 'photos', albumId: string, photo: Pi
 }
 
 export const api = {
+  /** GET current startup/index status. */
+  status(): Promise<ScanStatus> {
+    return fetchJson('/api/status')
+  },
+
   /** GET /api/albums */
   albums(): Promise<AlbumsResponse> {
     return fetchJson('/api/albums')

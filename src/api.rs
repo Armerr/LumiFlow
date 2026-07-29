@@ -42,6 +42,22 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
+pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    match &state.timeline {
+        Some(service) => Json(serde_json::to_value(service.status()).unwrap_or_default()),
+        None => Json(serde_json::json!({
+            "state": "ready",
+            "phase": "ready",
+            "found": 0,
+            "processed": 0,
+            "errors": 0,
+            "workers": 0,
+            "elapsed_seconds": 0,
+            "error": null,
+        })),
+    }
+}
+
 // --- GET /api/albums ---
 
 pub async fn list_albums(

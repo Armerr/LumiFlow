@@ -18,7 +18,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 ];
 const EXCLUDED_COMPONENTS: &[&str] = &["@eaDir", "#recycle"];
 
-pub trait Analyzer {
+pub trait Analyzer: Sync {
     fn analyze(&self, path: &Path, photo_id: &str, timezone: Tz) -> Result<PhotoAnalysis>;
 }
 
@@ -50,7 +50,7 @@ pub fn scan(
     timezone: Tz,
     analyzer: &impl Analyzer,
 ) -> Result<ScanReport> {
-    scan_with_exclude(root, db, timezone, analyzer, r"$^")
+    scan_parallel(root, db, timezone, analyzer, r"$^", 1, |_| {})
 }
 
 pub fn scan_with_exclude(
@@ -59,6 +59,18 @@ pub fn scan_with_exclude(
     timezone: Tz,
     analyzer: &impl Analyzer,
     exclude_regex: &str,
+) -> Result<ScanReport> {
+    scan_parallel(root, db, timezone, analyzer, exclude_regex, 1, |_| {})
+}
+
+pub fn scan_parallel(
+    root: &Path,
+    db: &TimelineDb,
+    timezone: Tz,
+    analyzer: &impl Analyzer,
+    exclude_regex: &str,
+    workers: usize,
+    mut on_progress: impl FnMut(ScanReport),
 ) -> Result<ScanReport> {
     let exclude = Regex::new(exclude_regex).context("invalid exclude regex")?;
     let canonical_root = root
@@ -72,6 +84,7 @@ pub fn scan_with_exclude(
 
     let scan_id = make_scan_id();
     let mut report = ScanReport::default();
+    let mut analysis_jobs = Vec::new();
     let mut walker = WalkDir::new(&canonical_root)
         .follow_links(false)
         .sort_by_file_name()
@@ -117,39 +130,80 @@ pub fn scan_with_exclude(
 
         match db.upsert_candidate(&candidate)? {
             AnalysisDecision::Reuse => report.reused += 1,
-            AnalysisDecision::Analyze => {
-                let analysis = analyzer
-                    .analyze(&canonical_path, &candidate.id, timezone)
+            AnalysisDecision::Analyze => analysis_jobs.push(AnalysisJob {
+                path: canonical_path,
+                photo_id: candidate.id,
+                relative_path,
+            }),
+        }
+        on_progress(report);
+    }
+
+    let worker_count = workers.max(1).min(analysis_jobs.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| -> Result<()> {
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc;
+
+        let (sender, receiver) = mpsc::sync_channel(worker_count);
+        for _ in 0..worker_count {
+            let sender = sender.clone();
+            let jobs = &analysis_jobs;
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(job) = jobs.get(index) else { break };
+                let result = analyzer
+                    .analyze(&job.path, &job.photo_id, timezone)
                     .and_then(|analysis| {
                         anyhow::ensure!(
-                            analysis.id == candidate.id,
+                            analysis.id == job.photo_id,
                             "analyzer returned mismatched photo id `{}` for `{}`",
                             analysis.id,
-                            candidate.id
+                            job.photo_id
                         );
                         Ok(analysis)
                     });
-                match analysis {
-                    Ok(analysis) => {
-                        db.save_analysis(&analysis)?;
-                        report.analyzed += 1;
-                    }
-                    Err(error) => {
-                        db.mark_analysis_error(&candidate.id)?;
-                        report.errors += 1;
-                        tracing::warn!(
-                            photo = %relative_path,
-                            error = %format!("{error:#}"),
-                            "timeline photo analysis failed"
-                        );
-                    }
+                if sender.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(sender);
+
+        for _ in 0..analysis_jobs.len() {
+            let (index, analysis) = receiver
+                .recv()
+                .context("photo analysis workers stopped unexpectedly")?;
+            let job = &analysis_jobs[index];
+            match analysis {
+                Ok(analysis) => {
+                    db.save_analysis(&analysis)?;
+                    report.analyzed += 1;
+                }
+                Err(error) => {
+                    db.mark_analysis_error(&job.photo_id)?;
+                    report.errors += 1;
+                    tracing::warn!(
+                        photo = %job.relative_path,
+                        error = %format!("{error:#}"),
+                        "timeline photo analysis failed"
+                    );
                 }
             }
+            on_progress(report);
         }
-    }
+        Ok(())
+    })?;
 
     report.marked_missing = db.mark_missing_except(&scan_id)?;
     Ok(report)
+}
+
+struct AnalysisJob {
+    path: std::path::PathBuf,
+    photo_id: String,
+    relative_path: String,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +464,50 @@ mod tests {
             .into_iter()
             .map(|photo| photo.relative_path)
             .collect()
+    }
+
+    struct ConcurrentAnalyzer {
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+    }
+
+    impl Analyzer for ConcurrentAnalyzer {
+        fn analyze(&self, path: &Path, photo_id: &str, timezone: Tz) -> Result<PhotoAnalysis> {
+            let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let result = CountingAnalyzer::default().analyze(path, photo_id, timezone);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+    }
+
+    #[test]
+    fn analyzes_photos_in_parallel_without_exceeding_worker_limit() {
+        let root = TestDir::new();
+        for index in 0..8 {
+            root.write(&format!("photo-{index}.jpg"), b"photo");
+        }
+        let db = TimelineDb::open_in_memory().expect("db");
+        let analyzer = ConcurrentAnalyzer {
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+        };
+
+        let report = scan_parallel(
+            root.path(),
+            &db,
+            chrono_tz::UTC,
+            &analyzer,
+            r"$^",
+            3,
+            |_| {},
+        )
+        .expect("parallel scan");
+
+        assert_eq!(report.analyzed, 8);
+        assert!(analyzer.maximum.load(Ordering::SeqCst) > 1);
+        assert!(analyzer.maximum.load(Ordering::SeqCst) <= 3);
     }
 
     #[test]
