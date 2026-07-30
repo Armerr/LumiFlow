@@ -3,20 +3,69 @@ import { router } from '../shared/router'
 import type { Page } from '../shared/router'
 import type { Album, ScanStatus } from '../shared/types'
 import { FanScene } from './fan/FanScene'
+import { albumFilterQuery, type AlbumFilter } from '../shared/albumPresentation'
+import { mountFilterBar } from './fan/FilterBar'
 import './fan.scss'
+
+function renderFilteredEmpty(): string {
+  return '<div class="empty-state"><p>当前筛选条件下暂无相册</p></div>'
+}
 
 export function albumNavigationIdentity(album: Album): string {
   return album.id ?? album.name
 }
 
-export function createFanPage(): Page {
+export function createFanPage(initialFilter: AlbumFilter = {}): Page {
   let scene: FanScene | null = null
   let timer: number | null = null
   let disposed = false
+  let tearDownFilter: (() => void) | null = null
+  let currentFilter = { ...initialFilter }
 
   const clearTimer = () => {
     clearTimeout(timer ?? undefined)
     timer = null
+  }
+
+  const loadAlbums = async (container: HTMLElement): Promise<void> => {
+    if (disposed) return
+
+    const query = albumFilterQuery(currentFilter)
+    let data
+    try {
+      data = await api.albums(query)
+      router.setAlbums(data)
+    } catch {
+      container.innerHTML = '<div class="error-state"><p>无法加载相册</p></div>'
+      return
+    }
+    if (disposed) return
+
+    scene?.dispose()
+    scene = null
+
+    if (data.albums.length === 0) {
+      container.innerHTML = renderFilteredEmpty()
+      return
+    }
+
+    container.innerHTML = '<div class="fan-filter-bar" id="fan-filter-bar"></div>'
+    scene = new FanScene(container)
+    scene.onAlbumClick = (album: Album) => {
+      router.navigate({ page: 'album', name: albumNavigationIdentity(album) })
+    }
+    scene.setAlbums(data.albums)
+
+    const filterRoot = container.querySelector<HTMLElement>('#fan-filter-bar')
+    if (filterRoot) {
+      tearDownFilter?.()
+      tearDownFilter = mountFilterBar(filterRoot, currentFilter, {
+        onChange: (next) => {
+          currentFilter = next
+          void loadAlbums(container)
+        },
+      })
+    }
   }
 
   return {
@@ -42,26 +91,7 @@ export function createFanPage(): Page {
           return
         }
 
-        let data
-        try {
-          data = await api.albums()
-          router.setAlbums(data)
-        } catch {
-          container.innerHTML = '<div class="error-state"><p>无法加载相册</p></div>'
-          return
-        }
-        if (disposed) return
-        if (data.albums.length === 0) {
-          container.innerHTML = '<div class="empty-state"><p>暂无相册</p></div>'
-          return
-        }
-
-        container.innerHTML = ''
-        scene = new FanScene(container)
-        scene.onAlbumClick = (album: Album) => {
-          router.navigate({ page: 'album', name: albumNavigationIdentity(album) })
-        }
-        scene.setAlbums(data.albums)
+        await loadAlbums(container)
       }
 
       await load()
@@ -70,6 +100,8 @@ export function createFanPage(): Page {
     unmount() {
       disposed = true
       clearTimer()
+      tearDownFilter?.()
+      tearDownFilter = null
       scene?.dispose()
       scene = null
     },

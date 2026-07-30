@@ -243,6 +243,64 @@
   }
 }
 
+
+.fan-filter-bar {
+  position: absolute;
+  z-index: 4;
+  top: max(14px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border: 1px solid rgba(238, 242, 245, 0.14);
+  border-radius: 999px;
+  background: rgba(13, 17, 22, 0.84);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32);
+}
+
+.fan-filter-label {
+  color: rgba(238, 242, 245, 0.52);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.fan-filter-year,
+.fan-filter-month {
+  padding: 6px 10px;
+  border: 1px solid rgba(238, 242, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(238, 242, 245, 0.06);
+  color: var(--color-text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+
+  &.is-active {
+    border-color: rgba(238, 202, 132, 0.64);
+    color: rgba(238, 202, 132, 0.96);
+  }
+}
+
+.fan-filter-clear {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(211, 107, 107, 0.18);
+  color: rgba(233, 157, 157, 0.92);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+
+  &:hover {
+    background: rgba(211, 107, 107, 0.32);
+  }
+}
+
 .scan-status-page {
   position: relative;
   width: 100%;
