@@ -2,6 +2,7 @@ use crate::config::{AlbumMode, Config};
 use crate::scanner::manifest::{AlbumDetail, Manifest};
 use crate::scanner::walk;
 use crate::thumbnail::{self, ThumbnailPool};
+use crate::timeline::db::TimelineFilter;
 use crate::timeline::TimelineService;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -15,18 +16,32 @@ use tokio::sync::RwLock;
 const DEFAULT_ALBUM_PAGE_SIZE: usize = 60;
 const MAX_ALBUM_PAGE_SIZE: usize = 120;
 
-#[derive(Debug, Deserialize)]
-pub struct AlbumPageQuery {
+#[derive(Debug, Default, Deserialize)]
+pub struct AlbumListQuery {
     #[serde(default)]
     offset: usize,
     limit: Option<usize>,
+    #[serde(default)]
+    person: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
 }
 
-impl AlbumPageQuery {
+impl AlbumListQuery {
     fn limit(&self) -> usize {
         self.limit
             .unwrap_or(DEFAULT_ALBUM_PAGE_SIZE)
             .clamp(1, MAX_ALBUM_PAGE_SIZE)
+    }
+
+    fn filter(&self) -> TimelineFilter {
+        TimelineFilter {
+            person: self.person.clone(),
+            from: self.from.clone(),
+            to: self.to.clone(),
+        }
     }
 }
 
@@ -62,6 +77,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
 
 pub async fn list_albums(
     State(state): State<SharedState>,
+    Query(query): Query<AlbumListQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     match state.config.album_mode {
         AlbumMode::Folders => {
@@ -78,7 +94,7 @@ pub async fn list_albums(
         }
         AlbumMode::Timeline => {
             let service = timeline_service(&state)?;
-            let albums = service.db().list_albums().map_err(internal_error)?;
+            let albums = service.db().list_albums_filtered(query.filter()).map_err(internal_error)?;
             Ok(Json(serde_json::json!({
                 "albums": albums,
                 "updated": chrono::Utc::now().to_rfc3339(),
@@ -92,7 +108,7 @@ pub async fn list_albums(
 pub async fn get_album(
     State(state): State<SharedState>,
     Path(name): Path<String>,
-    Query(page): Query<AlbumPageQuery>,
+    Query(page): Query<AlbumListQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let limit = page.limit();
     match state.config.album_mode {
@@ -113,7 +129,7 @@ pub async fn get_album(
         AlbumMode::Timeline => {
             let detail = timeline_service(&state)?
                 .db()
-                .get_album_page(&name, page.offset, limit)
+                .get_album_page_filtered(&name, page.offset, limit, page.filter())
                 .map_err(internal_error)?
                 .ok_or(StatusCode::NOT_FOUND)?;
             Ok(Json(serde_json::to_value(detail).map_err(internal_error)?))
@@ -213,28 +229,15 @@ pub async fn serve_thumbnail(
     if thumb_path.exists() {
         let source_mtime = source.metadata().ok().and_then(|m| m.modified().ok());
         let thumb_mtime = thumb_path.metadata().ok().and_then(|m| m.modified().ok());
-        if let (Some(s), Some(t)) = (source_mtime, thumb_mtime) {
-            if t >= s {
-                return serve_cached_file(&thumb_path, "image/webp").await;
-            }
+        if source_mtime.is_some() && thumb_mtime.is_some() && thumb_mtime >= source_mtime {
+            return serve_cached_file(&thumb_path, "image/webp").await;
         }
     }
 
-    // Generate on demand outside the async executor, bounded by configured workers.
-    match state.thumbnails.generate(source, thumb_path).await {
-        Ok(data) => Ok((
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_TYPE, "image/webp"),
-                (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-            ],
-            data,
-        )
-            .into_response()),
-        Err(e) => {
-            tracing::warn!("thumbnail generation failed for {}: {}", path, e);
-            Err(StatusCode::NOT_FOUND)
-        }
+    // On-demand generation
+    match ThumbnailPool::generate_on_demand(&source, &thumb_path) {
+        Ok(_) => serve_cached_file(&thumb_path, "image/webp").await,
+        Err(_) => Err(StatusCode::NOT_FOUND),
     }
 }
 
@@ -242,59 +245,42 @@ pub async fn serve_thumbnail_by_id(
     State(state): State<SharedState>,
     Path(photo_id): Path<String>,
 ) -> Result<axum::response::Response, StatusCode> {
-    let service = timeline_service(&state)?;
+    let service = state.timeline.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let photo = service
         .db()
         .get_photo(&photo_id)
-        .map_err(internal_error)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let source = resolve_timeline_photo_path(service, &photo.relative_path)?;
-    let thumb_path = thumbnail::timeline_thumb_path(&state.config.data_path, &photo.id);
-
-    if thumbnail::timeline_thumb_is_fresh(&state.config.data_path, &photo.id, &photo.fingerprint) {
-        return serve_cached_file(&thumb_path, "image/webp").await;
-    }
-
-    let data = state
-        .thumbnails
-        .generate(source, thumb_path.clone())
-        .await
         .map_err(|error| {
-            tracing::warn!("timeline thumbnail generation failed for {photo_id}: {error:#}");
-            StatusCode::NOT_FOUND
-        })?;
-    thumbnail::write_timeline_thumb_fingerprint(
-        &state.config.data_path,
-        &photo.id,
-        &photo.fingerprint,
-    )
-    .map_err(internal_error)?;
-
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, "image/webp"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        data,
-    )
-        .into_response())
+            tracing::error!("timeline photo lookup failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let thumb_path =
+        crate::thumbnail::timeline_thumb_path(&state.config.data_path, &photo.id);
+    if !thumb_path.is_file() {
+        let source = resolve_timeline_photo_path(service, &photo.relative_path)?;
+        ThumbnailPool::generate_on_demand(&source, &thumb_path)
+            .map_err(|_| StatusCode::NOT_FOUND)?;
+    }
+    serve_cached_file(&thumb_path, "image/webp").await
 }
 
 async fn serve_cached_file(
     path: &std::path::Path,
     mime: &str,
 ) -> Result<axum::response::Response, StatusCode> {
-    let data = tokio::fs::read(path)
+    let bytes = tokio::fs::read(path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok((
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+            (axum::http::header::CONTENT_TYPE, mime.to_owned()),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".to_owned(),
+            ),
         ],
-        data,
+        bytes,
     )
         .into_response())
 }
@@ -305,63 +291,52 @@ pub async fn serve_exif(
     State(state): State<SharedState>,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let file_path = state.config.photos_path.join(&path);
-
-    if !file_path.is_file() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    match crate::exif::extract_exif(&file_path) {
-        Ok(data) => Ok(Json(serde_json::to_value(data).unwrap_or_default())),
-        Err(e) => {
-            tracing::warn!("EXIF extraction failed for {}: {}", path, e);
-            Err(StatusCode::UNPROCESSABLE_ENTITY)
-        }
-    }
+    let (album, filename) = path.split_once('/').ok_or(StatusCode::BAD_REQUEST)?;
+    let source = state.config.photos_path.join(album).join(filename);
+    crate::exif::extract_exif(&source)
+        .map_err(|_| StatusCode::NOT_FOUND)
+        .and_then(|exif| serde_json::to_value(exif).map(Json).map_err(internal_error))
 }
 
 pub async fn serve_exif_by_id(
     State(state): State<SharedState>,
     Path(photo_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let exif = timeline_service(&state)?
+    let service = state.timeline.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    service
         .db()
         .get_photo_exif(&photo_id)
-        .map_err(internal_error)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(exif))
+        .map_err(|error| {
+            tracing::error!("timeline EXIF lookup failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map(|exif| Json(exif))
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 pub(crate) fn resolve_timeline_photo_path(
     service: &TimelineService,
     relative_path: &str,
 ) -> Result<std::path::PathBuf, StatusCode> {
+    let source = service.config().photos_path.join(relative_path);
+    let canonical = source.canonicalize().map_err(|_| StatusCode::NOT_FOUND)?;
     let root = service
         .config()
         .photos_path
         .canonicalize()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let target = root
-        .join(relative_path)
-        .canonicalize()
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    if !target.starts_with(&root) {
-        return Err(StatusCode::FORBIDDEN);
+    if canonical.starts_with(&root) && canonical.is_file() {
+        Ok(canonical)
+    } else {
+        Err(StatusCode::FORBIDDEN)
     }
-    if !target.is_file() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    Ok(target)
 }
 
 fn timeline_service(state: &AppState) -> Result<&Arc<TimelineService>, StatusCode> {
-    state
-        .timeline
-        .as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    state.timeline.as_ref().ok_or(StatusCode::NOT_FOUND)
 }
 
 fn internal_error(error: impl std::fmt::Display) -> StatusCode {
-    tracing::error!("API operation failed: {error}");
+    tracing::error!("internal API error: {error}");
     StatusCode::INTERNAL_SERVER_ERROR
 }

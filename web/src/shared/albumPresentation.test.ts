@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { albumPresentation } from './albumPresentation'
+import { albumFilterQuery, albumPresentation } from './albumPresentation'
 
 describe('album presentation', () => {
   test('uses timeline date, place, and AI summary instead of the folder-derived name', () => {
@@ -34,5 +34,16 @@ describe('album presentation', () => {
       metadata: '2025-京都夜色',
       summary: '9 张照片',
     })
+  })
+})
+
+describe('album filter query', () => {
+  test('serialises non-empty person and date filters', () => {
+    expect(albumFilterQuery({ person: '妈妈', from: '2024-01-01', to: '2024-06-30' })).toBe('person=%E5%A6%88%E5%A6%88&from=2024-01-01&to=2024-06-30')
+  })
+
+  test('omits empty fields', () => {
+    expect(albumFilterQuery({})).toBe('')
+    expect(albumFilterQuery({ from: '2024-01-01' })).toBe('from=2024-01-01')
   })
 })

@@ -22,15 +22,17 @@ export const api = {
     return fetchJson('/api/status')
   },
 
-  /** GET /api/albums */
-  albums(): Promise<AlbumsResponse> {
-    return fetchJson('/api/albums')
+  /** GET /api/albums with optional filters. */
+  albums(filter?: string): Promise<AlbumsResponse> {
+    const query = filter ? `?${filter}` : ''
+    return fetchJson(`/api/albums${query}`)
   },
 
-  /** GET one page from /api/albums/:id. */
-  album(albumId: string, offset = 0, limit = 60): Promise<AlbumDetail> {
+  /** GET one page from /api/albums/:id with optional filters. */
+  album(albumId: string, offset = 0, limit = 60, filter?: string): Promise<AlbumDetail> {
     const query = new URLSearchParams({ offset: String(offset), limit: String(limit) })
-    return fetchJson(`/api/albums/${encodeURIComponent(albumId)}?${query}`)
+    const filterPrefix = filter ? `&${filter}` : ''
+    return fetchJson(`/api/albums/${encodeURIComponent(albumId)}?${query}${filterPrefix}`)
   },
 
   /** Fetch EXIF through the route matching the photo identity kind. */

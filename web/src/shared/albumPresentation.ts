@@ -23,3 +23,17 @@ function formatAlbumDate(value: string | null | undefined): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
   return match ? `${match[1]}.${match[2]}.${match[3]}` : value
 }
+
+export interface AlbumFilter {
+  person?: string
+  from?: string
+  to?: string
+}
+
+export function albumFilterQuery(filter: AlbumFilter): string {
+  const params = new URLSearchParams()
+  if (filter.person) params.set('person', filter.person)
+  if (filter.from) params.set('from', filter.from)
+  if (filter.to) params.set('to', filter.to)
+  return params.toString()
+}

@@ -119,6 +119,13 @@ CREATE INDEX IF NOT EXISTS idx_ai_fingerprint
     ON album_ai_descriptions(album_id, input_fingerprint, model);
 "#;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimelineFilter {
+    pub person: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct TimelineDb {
     storage: DbStorage,
@@ -424,20 +431,27 @@ impl TimelineDb {
         })
     }
 
-    pub fn list_albums(&self) -> Result<Vec<TimelineAlbum>> {
+    pub fn list_albums_filtered(&self, filter: TimelineFilter) -> Result<Vec<TimelineAlbum>> {
+        let date_where = date_filter_clause(&filter);
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
+            let sql = format!(
                 "SELECT a.id, a.display_name, NULLIF(d.description, ''), a.date_start, a.date_end,
                         a.place_name, a.holiday_name, a.photo_count, a.cover_photo_id
                  FROM albums a
                  LEFT JOIN album_ai_descriptions d ON d.album_id = a.id
-                 ORDER BY a.date_start IS NULL, a.date_start DESC, a.id ASC",
-            )?;
-            let albums = statement
+                 {date_where}
+                 ORDER BY a.date_start IS NULL, a.date_start DESC, a.id ASC"
+            );
+            let albums = connection
+                .prepare(&sql)?
                 .query_map([], map_album)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(albums)
         })
+    }
+
+    pub(crate) fn list_albums(&self) -> Result<Vec<TimelineAlbum>> {
+        self.list_albums_filtered(TimelineFilter::default())
     }
 
     pub fn get_album(&self, id: &str) -> Result<Option<TimelineAlbumDetail>> {
@@ -478,6 +492,16 @@ impl TimelineDb {
         offset: usize,
         limit: usize,
     ) -> Result<Option<TimelineAlbumDetail>> {
+        self.get_album_page_filtered(id, offset, limit, TimelineFilter::default())
+    }
+
+    pub fn get_album_page_filtered(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+        filter: TimelineFilter,
+    ) -> Result<Option<TimelineAlbumDetail>> {
         self.with_connection(|connection| {
             let album = connection
                 .query_row(
@@ -494,18 +518,20 @@ impl TimelineDb {
                 return Ok(None);
             };
 
-            let mut statement = connection.prepare(
+            let date_where = date_filter_clause(&filter);
+            let sql = format!(
                 "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
                         p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
                  FROM album_photos ap
                  JOIN photos p ON p.id = ap.photo_id
-                 WHERE ap.album_id = ?1 AND p.status = 'active'
+                 WHERE ap.album_id = ?1 AND p.status = 'active'{date_where}
                  ORDER BY ap.sort_order, p.id
-                 LIMIT ?2 OFFSET ?3",
-            )?;
+                 LIMIT ?2 OFFSET ?3"
+            );
             let limit = i64::try_from(limit).context("album page limit exceeds SQLite range")?;
             let offset = i64::try_from(offset).context("album page offset exceeds SQLite range")?;
-            let photos = statement
+            let photos = connection
+                .prepare(&sql)?
                 .query_map(params![id, limit, offset], map_photo)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(Some(TimelineAlbumDetail { album, photos }))
@@ -846,6 +872,21 @@ fn lock_connection(connection: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_,
         .map_err(|_| anyhow::anyhow!("in-memory timeline database lock was poisoned"))
 }
 
+
+fn date_filter_clause(filter: &TimelineFilter) -> String {
+    let mut conditions = Vec::new();
+    if let Some(ref from) = filter.from {
+        conditions.push(format!("p.taken_at >= '{from}'"));
+    }
+    if let Some(ref to) = filter.to {
+        conditions.push(format!("p.taken_at <= '{to}T23:59:59'"));
+    }
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", conditions.join(" AND "))
+    }
+}
 fn map_photo(row: &Row<'_>) -> rusqlite::Result<TimelinePhoto> {
     let width: Option<i64> = row.get(3)?;
     let height: Option<i64> = row.get(4)?;
