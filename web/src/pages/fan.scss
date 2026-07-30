@@ -49,50 +49,50 @@
   cursor: grabbing;
 }
 
-.fan-label-layer {
+.fan-caption-layer {
   position: fixed;
   inset: 0;
   z-index: 2;
   pointer-events: none;
 }
 
-.fan-card-hit {
+.fan-photo-caption {
   position: absolute;
-  top: 0;
   left: 0;
-  width: clamp(180px, 18vw, 300px);
-  min-height: 72px;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: flex-start;
-  border: 1px solid rgba(238, 242, 245, 0.18);
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(11, 13, 16, 0) 0%, rgba(11, 13, 16, 0.58) 56%, rgba(11, 13, 16, 0.82) 100%);
+  top: 0;
+  width: min(28vw, 380px);
+  padding: 16px 18px 18px;
   color: var(--color-text);
-  pointer-events: auto;
-  cursor: pointer;
-  text-align: left;
-  transition: border-color var(--transition-fast), background var(--transition-fast), opacity var(--transition-fast);
-  touch-action: pan-y;
-
-  span {
-    font-size: clamp(14px, 1.2vw, 18px);
-    font-weight: 600;
-    letter-spacing: -0.02em;
-  }
-
-  small {
-    margin-top: 4px;
-    color: var(--color-text-dim);
-    font-size: 12px;
-  }
+  background: linear-gradient(180deg, transparent 0%, rgba(8, 10, 14, 0.08) 20%, rgba(8, 10, 14, 0.82) 100%);
+  border-left: 1px solid rgba(238, 242, 245, 0.42);
+  text-shadow: 0 3px 18px rgba(0, 0, 0, 0.72);
+  transform-origin: center bottom;
+  transition: opacity var(--transition-fast);
 }
 
-.fan-card-hit:hover {
-  border-color: rgba(238, 242, 245, 0.42);
-  background: linear-gradient(180deg, rgba(11, 13, 16, 0.04) 0%, rgba(11, 13, 16, 0.5) 48%, rgba(11, 13, 16, 0.88) 100%);
+.fan-photo-metadata {
+  color: rgba(238, 202, 132, 0.96);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.fan-photo-summary {
+  margin-top: 7px;
+  font-size: clamp(14px, 1.25vw, 19px);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.28;
+}
+
+.fan-poster-description {
+  max-width: 290px;
+  margin-top: 10px;
+  color: rgba(238, 242, 245, 0.72);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 
@@ -229,30 +229,13 @@
     }
   }
 
-  .fan-card-hit {
-    width: clamp(152px, 52vw, 204px);
-    height: clamp(260px, 42vh, 360px);
-    padding: 0;
-    justify-content: flex-start;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    text-shadow: 0 2px 14px rgba(8, 9, 14, 0.72);
+  .fan-photo-caption {
+    width: min(56vw, 280px);
+    padding: 12px 14px 14px;
+  }
 
-
-    &:hover {
-      border-color: transparent;
-      background: transparent;
-    }
-    span {
-      font-size: 15px;
-      font-weight: 700;
-    }
-
-    small {
-      color: rgba(238, 242, 245, 0.68);
-      font-size: 11px;
-    }
+  .fan-photo-summary {
+    font-size: 14px;
   }
 
   .fan-poster-chrome {

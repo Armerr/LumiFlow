@@ -36,6 +36,7 @@ describe('startup scan screen', () => {
       found: 125,
       processed: 120,
       errors: 1,
+      workers: 4,
       elapsed_seconds: 3,
     })
 

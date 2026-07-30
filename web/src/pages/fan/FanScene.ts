@@ -1,8 +1,9 @@
 import * as THREE from 'three'
 import type { Album } from '../../shared/types'
 import { api } from '../../shared/api'
+import { albumPresentation } from '../../shared/albumPresentation'
 import { lerp } from '../../shared/math'
-import { getActiveFanIndex, getFanCardMetrics, getFanCardPose, getFanPosterStats } from './fanLayout'
+import { getActiveFanIndex, getFanAlbumAtScreenPoint, getFanCardMetrics, getFanCardPose, getFanPosterStats, isFanDrag, isFanGestureStart } from './fanLayout'
 
 // Three injects built-in attributes/uniforms for ShaderMaterial; only declare
 // custom uniforms/varyings here.
@@ -73,9 +74,10 @@ export class FanScene {
   private rafId = 0
   private observer: ResizeObserver | null = null
   private checkTimer: ReturnType<typeof setTimeout> | undefined
-  private labelLayer!: HTMLElement
+  private captionLayer!: HTMLElement
   private posterChrome!: HTMLElement
   private activeAlbumIndex = -1
+  private gesturePointer = -1
   private didDrag = false
 
   constructor(container: HTMLElement) {
@@ -93,9 +95,9 @@ export class FanScene {
     this.renderer.setClearColor(0x000000, 0)
     this.container.classList.add('fan-page')
     this.container.appendChild(this.renderer.domElement)
-    this.labelLayer = document.createElement('div')
-    this.labelLayer.className = 'fan-label-layer'
-    this.container.appendChild(this.labelLayer)
+    this.captionLayer = document.createElement('div')
+    this.captionLayer.className = 'fan-caption-layer'
+    this.container.appendChild(this.captionLayer)
     this.posterChrome = document.createElement('div')
     this.posterChrome.className = 'fan-poster-chrome'
     this.container.appendChild(this.posterChrome)
@@ -122,22 +124,13 @@ export class FanScene {
     this.cards.forEach((c) => { this.scene.remove(c.mesh); c.dispose() })
     this.cards = []
 
-    this.labelLayer.innerHTML = ''
+    this.captionLayer.innerHTML = ''
     this.posterChrome.innerHTML = ''
     this.activeAlbumIndex = -1
     const total = albums.length
     for (let i = 0; i < total; i++) {
       const album = albums[i]
       const card = new Card(album, i, total)
-      const label = document.createElement('button')
-      label.className = 'fan-card-hit'
-      label.type = 'button'
-      label.innerHTML = `<span>${escapeHtml(album.name)}</span>${album.description ? `<small>${escapeHtml(album.description)}</small>` : ''}<small>${albumPhotoCount(album)} 张照片</small>`
-      label.addEventListener('click', () => {
-        if (!this.didDrag) this.onAlbumClick?.(album)
-      })
-      this.labelLayer.appendChild(label)
-      card.label = label
       this.scene.add(card.mesh)
       this.cards.push(card)
     }
@@ -169,6 +162,7 @@ export class FanScene {
     this.direction = this.scroll.current > this.scroll.last ? 'right' : 'left'
     for (const card of this.cards) card.update(this.scroll, this.direction, this.viewport)
     this.syncPosterChrome()
+    this.syncActiveCaption()
     this.renderer.render(this.scene, this.camera)
     this.scroll.last = this.scroll.current
   }
@@ -182,6 +176,11 @@ export class FanScene {
   }
 
   private onDown = (e: PointerEvent) => {
+    if (e.button !== 0) return
+    if (e.target instanceof Element && e.target.closest('.fan-film-rail')) return
+    if (this.gesturePointer !== -1) return
+    this.gesturePointer = e.pointerId
+
     this.isDown = true
     this.didDrag = false
     this.scrollPos = this.scroll.current
@@ -191,16 +190,29 @@ export class FanScene {
 
   private onMove = (e: PointerEvent) => {
     if (!this.isDown) return
+    if (e.pointerId !== this.gesturePointer) return
     const distance = (this.startX - e.clientX) * 0.032
-    if (Math.abs(e.clientX - this.startX) > 6) this.didDrag = true
+    if (isFanDrag(this.startX, e.clientX)) this.didDrag = true
     this.scroll.target = this.scrollPos + distance
   }
 
-  private onUp = () => {
+  private onUp = (e: PointerEvent) => {
+    if (e.pointerId !== this.gesturePointer) return
+    this.gesturePointer = -1
+
     if (!this.isDown) return
+
     this.isDown = false
     this.container.classList.remove('is-dragging')
     this.onCheck()
+
+    if (!this.didDrag && e.type !== 'pointercancel') {
+      const rect = this.renderer.domElement.getBoundingClientRect()
+      this.scene.updateMatrixWorld()
+      const album = getFanAlbumAtScreenPoint(this.camera, this.cards, rect, e.clientX, e.clientY)
+      if (album) this.onAlbumClick?.(album)
+    }
+
     window.setTimeout(() => { this.didDrag = false }, 0)
   }
   private onCheck = () => {
@@ -222,17 +234,28 @@ export class FanScene {
       return
     }
 
+    const presentation = albumPresentation(card.album)
     const stats = getFanPosterStats(this.cards.map((item) => albumPhotoCount(item.album)))
+    this.cards.forEach((item) => { item.caption = null })
+    this.captionLayer.innerHTML = `
+      <div class="fan-photo-caption" aria-hidden="true">
+        ${presentation.metadata ? `<div class="fan-photo-metadata">${escapeHtml(presentation.metadata)}</div>` : ''}
+        <div class="fan-photo-summary">${escapeHtml(presentation.summary)}</div>
+      </div>
+    `
+    const caption = this.captionLayer.firstElementChild
+    if (caption instanceof HTMLElement) card.caption = caption
+
     this.posterChrome.innerHTML = `
       <div class="fan-poster-top">
         <div>
           <div class="fan-poster-kicker">LumiFlow Albums</div>
-          <div class="fan-poster-title">${escapeHtml(card.album.name)}</div>
-          ${card.album.description ? `<div class="fan-poster-description">${escapeHtml(card.album.description)}</div>` : ''}
+          <div class="fan-poster-title">${escapeHtml(presentation.metadata)}</div>
+          <div class="fan-poster-description">${escapeHtml(presentation.summary)}</div>
         </div>
         <div class="fan-poster-stats"><span>${stats.albumCount}</span> albums<br><span>${stats.photoCount}</span> photos</div>
       </div>
-      <div class="fan-poster-bottom-caption">${active + 1} / ${this.cards.length} · 左右滑动浏览 · 点击照片进入</div>
+      <div class="fan-poster-bottom-caption">${active + 1} / ${this.cards.length} · 左右滑动浏览 · 轻点照片进入</div>
       <div class="fan-film-rail" aria-label="相册缩略图">
         ${this.cards.map((item, i) => `<button class="fan-film-frame ${i === active ? 'is-active' : ''}" type="button" aria-label="切换到 ${escapeAttr(item.album.name)}"><img src="${albumCoverThumbUrl(item.album)}" alt=""><span>${i + 1}</span></button>`).join('')}
       </div>
@@ -246,6 +269,10 @@ export class FanScene {
       })
     })
   }
+  private syncActiveCaption() {
+    this.cards[this.activeAlbumIndex]?.syncCaption(this.viewport)
+  }
+
   dispose() {
     cancelAnimationFrame(this.rafId)
     clearTimeout(this.checkTimer)
@@ -257,6 +284,7 @@ export class FanScene {
     window.removeEventListener('pointercancel', this.onUp)
     this.cards.forEach((c) => c.dispose())
     this.container.classList.remove('fan-page', 'is-dragging')
+    this.captionLayer.remove()
     this.posterChrome.remove()
     this.renderer.dispose()
     this.renderer.domElement.remove()
@@ -268,7 +296,7 @@ class Card {
   mesh: THREE.Mesh
   album: Album
   program: THREE.ShaderMaterial
-  label: HTMLElement | null = null
+  caption: HTMLElement | null = null
 
   extra = 0
   x = 0
@@ -358,22 +386,24 @@ class Card {
       this.extra += this.widthTotal
     }
 
-    this.syncLabel(viewport)
   }
 
-  private syncLabel(viewport: { width: number; height?: number }) {
-    if (!this.label) return
+  syncCaption(viewport: { width: number; height?: number }) {
+    if (!this.caption) return
     const x = ((this.mesh.position.x / viewport.width) + 0.5) * 100
     const isPortrait = (viewport.height ?? 0) > viewport.width * 1.35
-    const y = isPortrait ? 70 - (this.mesh.position.y + 3.85) * 10 : 50 - (this.mesh.position.y / (viewport.height ?? 1)) * 100
+    const centerY = isPortrait
+      ? 70 - (this.mesh.position.y + 3.85) * 10
+      : 50 - (this.mesh.position.y / (viewport.height ?? 1)) * 100
+    const cardHeight = (this.mesh.scale.y / Math.max(viewport.height ?? 1, 1)) * 100
+    const y = centerY + cardHeight * (isPortrait ? 0.3 : 0.36)
     const scale = Math.max(isPortrait ? 0.86 : 0.78, Math.min(1.08, 1 - Math.abs(this.mesh.position.x / viewport.width) * (isPortrait ? 0.12 : 0.22)))
-    const anchor = isPortrait ? 'translate(-50%, 0)' : 'translate(-50%, -50%)'
-    this.label.style.transform = `${anchor} translate(${x}vw, ${y}vh) rotate(${this.mesh.rotation.z}rad) scale(${scale})`
-    this.label.style.opacity = `${Math.max(isPortrait ? 0.48 : 0.28, Math.min(1, 1 - Math.abs(this.mesh.position.x / viewport.width) * (isPortrait ? 0.46 : 0.75)))}`
+    this.caption.style.transform = `translate(-50%, -100%) translate(${x}vw, ${y}vh) rotate(${this.mesh.rotation.z}rad) scale(${scale})`
+    this.caption.style.opacity = `${Math.max(0.28, Math.min(1, 1 - Math.abs(this.mesh.position.x / viewport.width) * 0.75))}`
   }
 
   dispose() {
-    this.label?.remove()
+    this.caption?.remove()
     this.program.uniforms.tMap.value?.dispose()
     this.program.dispose()
     this.mesh.geometry.dispose()

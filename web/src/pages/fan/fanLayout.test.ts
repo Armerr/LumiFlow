@@ -1,5 +1,6 @@
+import * as THREE from 'three'
 import { describe, expect, test } from 'vitest'
-import { getActiveFanIndex, getFanCardMetrics, getFanCardPose, getFanPosterStats } from './fanLayout'
+import { getActiveFanIndex, getFanAlbumAtScreenPoint, getFanCardMetrics, getFanCardPose, getFanPosterStats, isFanDrag, isFanGestureStart } from './fanLayout'
 
 describe('fan layout', () => {
   test('sizes album cards so multiple cards fit in the viewport', () => {
@@ -49,6 +50,32 @@ describe('fan layout', () => {
     expect(getActiveFanIndex([])).toBe(-1)
   })
 
+  test('chooses a WebGL card under a tap without a DOM overlay', () => {
+    const album = { id: 'day:2026-07-28', name: '2026.07.28 · 东京' }
+    const camera = new THREE.PerspectiveCamera(45, 1000 / 800, 0.1, 100)
+    camera.position.z = 20
+    camera.lookAt(0, 0, 0)
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
+
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4, 6), new THREE.MeshBasicMaterial())
+    mesh.updateMatrixWorld()
+    expect(getFanAlbumAtScreenPoint(camera, [{ album, mesh }], { left: 0, top: 0, width: 1000, height: 800 }, 500, 400)).toBe(album)
+    expect(getFanAlbumAtScreenPoint(camera, [{ album, mesh }], { left: 0, top: 0, width: 1000, height: 800 }, 20, 20)).toBeUndefined()
+
+    mesh.geometry.dispose()
+    mesh.material.dispose()
+  })
+
+  test('treats horizontal displacement past six pixels as a drag', () => {
+    expect(isFanDrag(500, 506)).toBe(false)
+    expect(isFanDrag(500, 507)).toBe(true)
+  })
+  test('tracks initiating pointer so second finger panning does not classify a drag', () => {
+    expect(isFanGestureStart(1)).toBe(true)
+    expect(isFanGestureStart(1, 1)).toBe(true)
+    expect(isFanGestureStart(1, 2)).toBe(false)
+  })
   test('summarizes albums for poster chrome', () => {
     expect(getFanPosterStats([6, 8, 10])).toEqual({ albumCount: 3, photoCount: 24 })
     expect(getFanPosterStats([])).toEqual({ albumCount: 0, photoCount: 0 })

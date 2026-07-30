@@ -1,3 +1,48 @@
+import * as THREE from 'three'
+import type { Album } from '../../shared/types'
+
+export interface FanHitCard {
+  album: Album
+  mesh: THREE.Mesh
+}
+
+export interface ScreenRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+const fanRaycaster = new THREE.Raycaster()
+
+/** Returns the frontmost album plane below a screen-space tap. */
+export function getFanAlbumAtScreenPoint(
+  camera: THREE.Camera,
+  cards: FanHitCard[],
+  rect: ScreenRect,
+  clientX: number,
+  clientY: number,
+): Album | undefined {
+  if (rect.width <= 0 || rect.height <= 0) return undefined
+
+  const point = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1,
+  )
+  fanRaycaster.setFromCamera(point, camera)
+  const hit = fanRaycaster.intersectObjects(cards.map((card) => card.mesh), false)[0]
+  return cards.find((card) => card.mesh === hit?.object)?.album
+}
+
+export function isFanDrag(startX: number, clientX: number): boolean {
+  return Math.abs(clientX - startX) > 6
+}
+
+/** Only the first pointer that starts a gesture can participate in it. */
+export function isFanGestureStart(initiatingPointerId: number, pointerId?: number): boolean {
+  return pointerId === undefined || pointerId === initiatingPointerId
+}
+
 export interface Size2D {
   width: number
   height: number

@@ -64,20 +64,15 @@ pub fn build_daily_albums(
         let (id, name, holiday, place) = match date {
             Some(date) => {
                 let holiday = holiday_for(date);
-                let date_name = format_album_name(date, &resolved_places, holiday);
+                let name = format_album_name(date, &resolved_places);
                 (
                     dated_album_id(&folder, date),
-                    folder_album_name(&folder, &date_name),
+                    name,
                     holiday.map(str::to_owned),
                     place_summary(&resolved_places),
                 )
             }
-            None => (
-                unknown_album_id(&folder),
-                folder_album_name(&folder, "Unknown Date"),
-                None,
-                None,
-            ),
+            None => (unknown_album_id(&folder), "日期未知".into(), None, None),
         };
         let photo_count = photo_ids.len();
         builds.push(DailyAlbumBuild {
@@ -107,19 +102,11 @@ pub fn build_daily_albums(
     Ok(builds)
 }
 
-pub fn format_album_name(
-    date: chrono::NaiveDate,
-    places: &[String],
-    holiday: Option<&str>,
-) -> String {
-    let mut name = date.to_string();
+pub fn format_album_name(date: chrono::NaiveDate, places: &[String]) -> String {
+    let mut name = date.format("%Y.%m.%d").to_string();
     if let Some(place) = place_summary(places) {
-        name.push(' ');
-        name.push_str(&place);
-    }
-    if let Some(holiday) = holiday {
         name.push_str(" · ");
-        name.push_str(holiday);
+        name.push_str(&place);
     }
     name
 }
@@ -143,14 +130,6 @@ fn unknown_album_id(folder: &str) -> String {
         "unknown-date".into()
     } else {
         format!("unknown-date:{}", folder_fingerprint(folder))
-    }
-}
-
-fn folder_album_name(folder: &str, time_name: &str) -> String {
-    if folder.is_empty() {
-        time_name.into()
-    } else {
-        format!("{folder} · {time_name}")
     }
 }
 
@@ -267,8 +246,8 @@ mod tests {
         assert_ne!(albums[0].album.id, albums[1].album.id);
         assert_eq!(albums[0].photo_ids, ["family"]);
         assert_eq!(albums[1].photo_ids, ["trip"]);
-        assert_eq!(albums[0].album.name, "Family · 2024-03-12");
-        assert_eq!(albums[1].album.name, "Trips · 2024-03-12");
+        assert_eq!(albums[0].album.name, "2024.03.12");
+        assert_eq!(albums[1].album.name, "2024.03.12");
     }
 
     #[test]
@@ -282,7 +261,7 @@ mod tests {
             build_daily_albums(&photos, chrono_tz::UTC, &FixedPlaces(vec![])).expect("album build");
 
         assert_eq!(albums.len(), 1);
-        assert_eq!(albums[0].album.name, "Trips · 2024-03-12");
+        assert_eq!(albums[0].album.name, "2024.03.12");
         assert_eq!(albums[0].photo_ids, ["kyoto", "tokyo"]);
     }
 
@@ -297,8 +276,8 @@ mod tests {
             build_daily_albums(&photos, chrono_tz::UTC, &FixedPlaces(vec![])).expect("album build");
 
         assert_eq!(albums.len(), 2);
-        assert_eq!(albums[0].album.name, "Family · Unknown Date");
-        assert_eq!(albums[1].album.name, "Trips · Unknown Date");
+        assert_eq!(albums[0].album.name, "日期未知");
+        assert_eq!(albums[1].album.name, "日期未知");
         assert!(albums
             .iter()
             .all(|build| build.album.id.starts_with("unknown-date:")));
@@ -316,7 +295,7 @@ mod tests {
 
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].album.id, "unknown-date");
-        assert_eq!(albums[0].album.name, "Unknown Date");
+        assert_eq!(albums[0].album.name, "日期未知");
         assert_eq!(albums[0].photo_ids, ["invalid", "missing"]);
         assert_eq!(albums[0].album.cover_photo_id.as_deref(), Some("missing"));
     }
@@ -338,20 +317,32 @@ mod tests {
     }
 
     #[test]
-    fn formats_date_places_and_holiday() {
+    fn builds_timeline_title_from_time_and_place_not_folder_name() {
+        let photos = vec![photo(
+            "spring",
+            "Camera Uploads/spring.jpg",
+            Some("2024-02-10T09:00:00+08:00"),
+        )];
+
+        let albums = build_daily_albums(
+            &photos,
+            chrono_tz::Asia::Shanghai,
+            &FixedPlaces(vec!["上海".into()]),
+        )
+        .expect("album build");
+
+        assert_eq!(albums[0].album.name, "2024.02.10 · 上海");
+        assert!(albums[0].album.id.starts_with("auto-day:2024-02-10:"));
+    }
+
+    #[test]
+    fn formats_date_and_places_without_holiday_suffix() {
         let day = NaiveDate::from_ymd_opt(2024, 2, 10).unwrap();
         assert_eq!(
-            format_album_name(day, &["上海".into()], Some("春节")),
-            "2024-02-10 上海 · 春节"
+            format_album_name(day, &["上海".into()]),
+            "2024.02.10 · 上海"
         );
-        assert_eq!(
-            format_album_name(day, &[], Some("春节")),
-            "2024-02-10 · 春节"
-        );
-        assert_eq!(
-            format_album_name(day, &["上海".into()], None),
-            "2024-02-10 上海"
-        );
+        assert_eq!(format_album_name(day, &[]), "2024.02.10");
     }
 
     #[test]
@@ -361,14 +352,13 @@ mod tests {
             format_album_name(
                 day,
                 &["上海".into(), "苏州".into(), "杭州".into(), "南京".into()],
-                None,
             ),
-            "2024-03-12 上海 · 苏州 +2"
+            "2024.03.12 · 上海 · 苏州 +2"
         );
     }
 
     #[test]
-    fn build_includes_folder_place_and_holiday_name() {
+    fn build_keeps_place_and_holiday_metadata_without_folder_title() {
         let photos = vec![photo(
             "spring",
             "Shanghai/spring.jpg",
@@ -382,7 +372,7 @@ mod tests {
         )
         .expect("album build");
 
-        assert_eq!(albums[0].album.name, "Shanghai · 2024-02-10 上海 · 春节");
+        assert_eq!(albums[0].album.name, "2024.02.10 · 上海");
         assert_eq!(albums[0].album.place.as_deref(), Some("上海"));
         assert_eq!(albums[0].album.holiday.as_deref(), Some("春节"));
     }
@@ -427,7 +417,7 @@ mod tests {
         assert_eq!(builds.len(), 1);
         assert_eq!(
             db.list_albums().expect("albums")[0].name,
-            "Shanghai · 2024-02-10 上海 · 春节"
+            "2024.02.10 · 上海"
         );
     }
 }
