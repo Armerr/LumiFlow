@@ -67,13 +67,6 @@ export interface ImageDimensions {
   height: number
 }
 
-export interface ToneAnalysis {
-  type: string
-  brightness: number
-  contrast: number
-  shadows: number
-  highlights: number
-}
 
 export interface ExifData {
   make: string | null
@@ -95,7 +88,6 @@ export interface ExifData {
   artist: string | null
   color_space: string | null
   image_description: string | null
-  user_comment: string | null
   tags: string[]
-  tone: ToneAnalysis | null
+  user_comment: string | null
 }

@@ -71,7 +71,7 @@ describe('detail original download', () => {
 })
 
 describe('photo metadata rendering', () => {
-  test('groups useful basic, device, shooting, tag, and tone fields', () => {
+  test('groups useful basic, device, shooting, and tag fields', () => {
     const html = renderPhotoInfo({
       make: 'FUJIFILM',
       model: 'X-T5',
@@ -94,7 +94,6 @@ describe('photo metadata rendering', () => {
       image_description: null,
       user_comment: null,
       tags: ['日本', '东京', '浅草'],
-      tone: { type: '高调', brightness: 79, contrast: 55, shadows: 11, highlights: 69 },
     }, {
       id: 0,
       name: 'DSCF6138.HIF',
@@ -123,9 +122,6 @@ describe('photo metadata rendering', () => {
     expect(html).toContain('ISO 160')
     expect(html).toContain('标签')
     expect(html).toContain('日本')
-    expect(html).toContain('影调分析')
-    expect(html).toContain('高调')
-    expect(html).toContain('79%')
   })
 
   test('rounds small megapixel counts instead of showing zero', () => {

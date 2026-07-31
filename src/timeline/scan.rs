@@ -778,7 +778,6 @@ mod tests {
             image_description: None,
             user_comment: None,
             tags: vec![],
-            tone: None,
         };
 
         let analysis = analysis_from_exif("id", "photo.jpg", UNIX_EPOCH, exif, chrono_tz::UTC)

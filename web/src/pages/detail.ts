@@ -157,13 +157,6 @@ export function renderPhotoInfo(exif: ExifData | null, photo: PhotoInfo): string
       ['备注', exif?.user_comment],
     ]),
     renderTags(exif?.tags ?? []),
-    renderInfoSection('影调分析', [
-      ['影调', exif?.tone?.type],
-      ['亮度', exif?.tone ? `${exif.tone.brightness}%` : null],
-      ['对比度', exif?.tone ? `${exif.tone.contrast}%` : null],
-      ['阴影', exif?.tone ? `${exif.tone.shadows}%` : null],
-      ['高光', exif?.tone ? `${exif.tone.highlights}%` : null],
-    ]),
   ]
 
   return sections.filter(Boolean).join('')

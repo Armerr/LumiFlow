@@ -27,7 +27,6 @@ pub struct ExifData {
     pub image_description: Option<String>,
     pub user_comment: Option<String>,
     pub tags: Vec<String>,
-    pub tone: Option<ToneAnalysis>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,15 +41,6 @@ pub struct ImageDimensions {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ToneAnalysis {
-    #[serde(rename = "type")]
-    pub tone_type: String,
-    pub brightness: u8,
-    pub contrast: u8,
-    pub shadows: u8,
-    pub highlights: u8,
-}
 
 /// Extract EXIF metadata from an image file.
 pub fn extract_exif(path: &Path) -> anyhow::Result<ExifData> {
@@ -92,7 +82,6 @@ pub fn extract_exif(path: &Path) -> anyhow::Result<ExifData> {
         image_description: None,
         user_comment: None,
         tags: Vec::new(),
-        tone: None,
     };
     let mut gps_lat_ref: Option<String> = None;
     let mut gps_lon_ref: Option<String> = None;
@@ -276,7 +265,7 @@ pub fn extract_exif(path: &Path) -> anyhow::Result<ExifData> {
         }
     }
 
-    data.tone = analyze_tone(path);
+
 
     if data.tags.is_empty() {
         data.tags = data
@@ -405,83 +394,13 @@ fn parse_inline_tags(value: &str) -> Vec<String> {
         .take(24)
         .collect()
 }
-
-fn analyze_tone(path: &Path) -> Option<ToneAnalysis> {
-    let image = crate::thumbnail::decode_image(path).ok()?;
-    analyze_tone_pixels(&image.data)
-}
-
-fn analyze_tone_pixels(rgba: &[u8]) -> Option<ToneAnalysis> {
-    let mut count: u64 = 0;
-    let mut sum: u64 = 0;
-    let mut sum_sq: u64 = 0;
-    let mut shadows: u64 = 0;
-    let mut highlights: u64 = 0;
-
-    for pixel in rgba.chunks_exact(4) {
-        if pixel[3] < 16 {
-            continue;
-        }
-        let luma =
-            ((54 * pixel[0] as u16 + 183 * pixel[1] as u16 + 19 * pixel[2] as u16) >> 8) as u64;
-        count += 1;
-        sum += luma;
-        sum_sq += luma * luma;
-        if luma < 64 {
-            shadows += 1;
-        }
-        if luma > 192 {
-            highlights += 1;
-        }
-    }
-
-    if count == 0 {
-        return None;
-    }
-
-    let mean = sum as f64 / count as f64;
-    let variance = (sum_sq as f64 / count as f64 - mean * mean).max(0.0);
-    let brightness = percent(mean, 255.0);
-    let contrast = percent(variance.sqrt(), 128.0);
-    let shadows = percent(shadows as f64, count as f64);
-    let highlights = percent(highlights as f64, count as f64);
-    let tone_type = if brightness >= 65 && highlights >= 30 && shadows <= 30 {
-        "高调"
-    } else if brightness <= 35 && shadows >= 40 {
-        "低调"
-    } else if contrast >= 35 {
-        "高反差"
-    } else {
-        "中性"
-    };
-
-    Some(ToneAnalysis {
-        tone_type: tone_type.into(),
-        brightness,
-        contrast,
-        shadows,
-        highlights,
-    })
-}
-
 fn percent(value: f64, max: f64) -> u8 {
     ((value / max * 100.0).round().clamp(0.0, 100.0)) as u8
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tone_analysis_classifies_high_key_images() {
-        let pixels = vec![
-            240, 240, 240, 255, 250, 250, 250, 255, 200, 200, 200, 255, 32, 32, 32, 255,
-        ];
-        let tone = analyze_tone_pixels(&pixels).expect("tone analysis");
-
-        assert_eq!(tone.tone_type, "高调");
-        assert!(tone.brightness >= 70);
-        assert!(tone.highlights >= 50);
-    }
 
     #[test]
     fn gps_coordinates_require_both_axes_before_serializing() {
@@ -534,7 +453,6 @@ mod tests {
             image_description: None,
             user_comment: None,
             tags: Vec::new(),
-            tone: None,
         }
     }
 }
