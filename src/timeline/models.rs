@@ -113,17 +113,6 @@ pub enum AnalysisDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VisionTags {
-    pub photo_id: String,
-    pub model: String,
-    pub input_fingerprint: String,
-    pub labels: Vec<String>,
-    pub scores: Vec<f32>,
-    pub analyzed_at: String,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlbumAiDescription {
     pub album_id: String,
     pub input_fingerprint: String,

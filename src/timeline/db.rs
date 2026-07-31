@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS album_ai_descriptions (
     error TEXT
 );
 
+CREATE TABLE IF NOT EXISTS timeline_scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    completed_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_photos_active_taken_at
     ON photos(status, taken_at, relative_path);
 CREATE INDEX IF NOT EXISTS idx_photos_last_scan_id
@@ -256,6 +261,29 @@ impl TimelineDb {
                 ],
             )?;
             Ok(decision)
+        })
+    }
+
+    pub fn has_completed_scan(&self) -> Result<bool> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM timeline_scan_state WHERE id = 1)",
+                    [],
+                    |row| row.get(0),
+                )?)
+        })
+    }
+
+    pub fn mark_scan_completed(&self) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO timeline_scan_state (id, completed_at)
+                 VALUES (1, CURRENT_TIMESTAMP)
+                 ON CONFLICT(id) DO UPDATE SET completed_at = excluded.completed_at",
+                [],
+            )?;
+            Ok(())
         })
     }
 
@@ -484,15 +512,6 @@ impl TimelineDb {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(Some(TimelineAlbumDetail { album, photos }))
         })
-    }
-
-    pub fn get_album_page(
-        &self,
-        id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<Option<TimelineAlbumDetail>> {
-        self.get_album_page_filtered(id, offset, limit, TimelineFilter::default())
     }
 
     pub fn get_album_page_filtered(
@@ -969,12 +988,21 @@ mod tests {
             "calendar_events",
             "photo_vision_tags",
             "album_ai_descriptions",
+            "timeline_scan_state",
         ] {
             assert!(
                 db.has_table(table).expect("schema query"),
                 "missing {table}"
             );
         }
+    }
+
+    #[test]
+    fn completed_scan_marker_round_trips() {
+        let db = TimelineDb::open_in_memory().expect("db");
+        assert!(!db.has_completed_scan().expect("initial scan state"));
+        db.mark_scan_completed().expect("mark completed");
+        assert!(db.has_completed_scan().expect("completed scan state"));
     }
 
     #[test]

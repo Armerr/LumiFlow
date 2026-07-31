@@ -5,7 +5,7 @@ use crate::thumbnail::{self, ThumbnailPool};
 use crate::timeline::db::TimelineFilter;
 use crate::timeline::TimelineService;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use regex::Regex;
@@ -218,6 +218,7 @@ pub async fn rescan(State(state): State<SharedState>) -> Json<serde_json::Value>
 pub async fn serve_thumbnail(
     State(state): State<SharedState>,
     axum::extract::Path(path): axum::extract::Path<String>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
     // Path format: <album>/<filename>
     let (album, filename) = path.split_once('/').ok_or(StatusCode::BAD_REQUEST)?;
@@ -230,13 +231,13 @@ pub async fn serve_thumbnail(
         let source_mtime = source.metadata().ok().and_then(|m| m.modified().ok());
         let thumb_mtime = thumb_path.metadata().ok().and_then(|m| m.modified().ok());
         if source_mtime.is_some() && thumb_mtime.is_some() && thumb_mtime >= source_mtime {
-            return serve_cached_file(&thumb_path, "image/webp").await;
+            return serve_cached_file(&thumb_path, "image/webp", &headers).await;
         }
     }
 
     // On-demand generation
     match ThumbnailPool::generate_on_demand(&source, &thumb_path) {
-        Ok(_) => serve_cached_file(&thumb_path, "image/webp").await,
+        Ok(_) => serve_cached_file(&thumb_path, "image/webp", &headers).await,
         Err(_) => Err(StatusCode::NOT_FOUND),
     }
 }
@@ -244,6 +245,7 @@ pub async fn serve_thumbnail(
 pub async fn serve_thumbnail_by_id(
     State(state): State<SharedState>,
     Path(photo_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
     let service = state.timeline.as_ref().ok_or(StatusCode::NOT_FOUND)?;
     let photo = service
@@ -267,24 +269,51 @@ pub async fn serve_thumbnail_by_id(
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
-    serve_cached_file(&thumb_path, "image/webp").await
+    serve_cached_file(&thumb_path, "image/webp", &headers).await
 }
 
 async fn serve_cached_file(
     path: &std::path::Path,
     mime: &str,
+    request_headers: &HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let etag = HeaderValue::from_str(&format!("\"{:x}-{:x}\"", metadata.len(), modified))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let etag_text = etag
+        .to_str()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .to_owned();
+    if request_headers.get(header::IF_NONE_MATCH) == Some(&etag) {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, etag),
+                (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=0, must-revalidate")),
+            ],
+        )
+            .into_response());
+    }
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok((
         StatusCode::OK,
         [
-            (axum::http::header::CONTENT_TYPE, mime.to_owned()),
+            (header::CONTENT_TYPE, mime.to_owned()),
             (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=31536000, immutable".to_owned(),
+                header::CACHE_CONTROL,
+                "public, max-age=0, must-revalidate".to_owned(),
             ),
+            (header::ETAG, etag_text),
         ],
         bytes,
     )

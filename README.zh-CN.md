@@ -157,7 +157,7 @@ environment:
   LUMIFLOW_AI_ENABLED: "false"
 ```
 
-时间线元数据和每日相册成员关系存放在 `LUMIFLOW_DATA_PATH/lumiflow.sqlite`；按 ID 的 WebP 缩略图位于 `thumbs/by-id/`；AI contact sheet 及其指纹位于 `ai/contact-sheets/`。再次扫描会复用未变化的 EXIF、缩略图、本地标签、contact sheet 和 AI 描述。
+时间线元数据和每日相册成员关系存放在 `LUMIFLOW_DATA_PATH/lumiflow.sqlite`；按 ID 的 WebP 缩略图位于 `thumbs/by-id/`；AI contact sheet 及其指纹位于 `ai/contact-sheets/`。首次成功索引后，服务重启直接复用该索引；文件变化由 watcher 处理，30 分钟兜底扫描会校验整棵目录。再次扫描会复用未变化的 EXIF、缩略图、本地标签、contact sheet 和 AI 描述。
 
 扫描、相册重建、缩略图、本地标签和 contact sheet 会在 rescan 响应前完成；远程 AI 请求随后在后台后处理任务中运行，因此缓慢或不可用的服务不会拖延启动、手动 rescan 或 watcher rescan。刷新相册列表即可看到新缓存的描述。
 

@@ -68,7 +68,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         thumbnails: pool,
     });
     if let Some(service) = &state.timeline {
-        service.start_initial_scan();
+        if service.needs_initial_scan() {
+            service.start_initial_scan();
+        } else {
+            tracing::info!("loaded completed timeline index; skipping startup rescan");
+        }
         crate::scanner::watcher::start_timeline(config.photos_path.clone(), service.clone());
     }
     let app = build_router(state);

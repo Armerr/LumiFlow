@@ -157,7 +157,7 @@ environment:
   LUMIFLOW_AI_ENABLED: "false"
 ```
 
-Timeline mode stores metadata and daily membership in `LUMIFLOW_DATA_PATH/lumiflow.sqlite`. By-ID WebP thumbnails live under `thumbs/by-id/`. AI contact sheets and fingerprints live under `ai/contact-sheets/`. Rescans reuse unchanged EXIF, thumbnails, local tags, contact sheets, and AI descriptions.
+Timeline mode stores metadata and daily membership in `LUMIFLOW_DATA_PATH/lumiflow.sqlite`. By-ID WebP thumbnails live under `thumbs/by-id/`. AI contact sheets and fingerprints live under `ai/contact-sheets/`. After the first successful index, a service restart reuses it directly; the watcher handles changes and the 30-minute fallback scan validates the full tree. Rescans reuse unchanged EXIF, thumbnails, local tags, contact sheets, and AI descriptions.
 
 Scanning, album rebuilding, thumbnails, local tags, and contact sheets complete before a rescan response. Remote AI requests then run in a background post-processing pass, so a slow or unavailable provider does not delay server startup or manual/watcher rescans. Refresh the album list to see newly cached descriptions.
 

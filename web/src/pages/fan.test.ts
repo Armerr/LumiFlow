@@ -40,10 +40,10 @@ describe('startup scan screen', () => {
       elapsed_seconds: 3,
     })
 
-    expect(html).toContain('正在建立照片索引')
+    expect(html).toContain('正在同步照片库')
     expect(html).toContain('已发现 125 张')
-    expect(html).toContain('已处理 120 张')
-    expect(html).toContain('请保持此页面打开')
+    expect(html).toContain('已校验 120 张')
+    expect(html).toContain('后续同步会复用未变化照片的数据')
   })
 })
 
@@ -58,7 +58,7 @@ describe('startup scan polling', () => {
     const page = createFanPage()
 
     await page.mount(container)
-    expect(container.innerHTML).toContain('正在建立照片索引')
+    expect(container.innerHTML).toContain('正在同步照片库')
     await vi.advanceTimersByTimeAsync(1000)
 
     expect(api.albums).toHaveBeenCalledTimes(1)

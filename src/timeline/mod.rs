@@ -100,6 +100,7 @@ impl TimelineService {
     pub fn open(config: Config) -> Result<Arc<Self>> {
         let timezone = parse_timezone(&config.timeline_timezone)?;
         let db = TimelineDb::open(config.data_path.join("lumiflow.sqlite"))?;
+        let has_completed_scan = db.has_completed_scan()?;
         let ai = config
             .ai
             .enabled
@@ -114,7 +115,16 @@ impl TimelineService {
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
-            status: Arc::new(StdMutex::new(ScanStatus::starting(workers))),
+            status: Arc::new(StdMutex::new(if has_completed_scan {
+                ScanStatus {
+                    state: ScanState::Ready,
+                    phase: "ready".into(),
+                    workers,
+                    ..ScanStatus::starting(workers)
+                }
+            } else {
+                ScanStatus::starting(workers)
+            })),
         }))
     }
 
@@ -141,6 +151,10 @@ impl TimelineService {
 
     pub fn db(&self) -> &TimelineDb { &self.db }
     pub fn config(&self) -> &Config { &self.config }
+
+    pub fn needs_initial_scan(&self) -> bool {
+        self.status().state == ScanState::Starting
+    }
 
     pub fn status(&self) -> ScanStatus {
         let mut status = self.status.lock().expect("scan status lock").clone();
@@ -186,6 +200,7 @@ impl TimelineService {
                 return Err(error);
             }
         };
+        self.db.mark_scan_completed()?;
         if let Some(ai) = &self.ai {
             schedule_ai_enrichment(self.db.clone(), ai.clone(), self.ai_schedule.clone(), ai_inputs);
         }
@@ -505,6 +520,11 @@ mod tests {
                 .len(),
             3
         );
+
+        let restarted = TimelineService::open(timeline_test_config(&photos.0, &data.0))
+            .expect("reopen timeline service");
+        assert_eq!(restarted.status().state, ScanState::Ready);
+        assert!(!restarted.needs_initial_scan());
     }
 
     #[test]

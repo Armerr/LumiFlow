@@ -56,19 +56,6 @@ impl Place {
 
 pub trait PlaceResolver {
     fn resolve_album_places(&self, photos: &[TimelinePhoto]) -> Result<Vec<String>>;
-
-    fn resolve_album_place(&self, photos: &[TimelinePhoto]) -> Result<Option<String>> {
-        Ok(self.resolve_album_places(photos)?.into_iter().next())
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoPlaces;
-
-impl PlaceResolver for NoPlaces {
-    fn resolve_album_places(&self, _photos: &[TimelinePhoto]) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
 }
 
 #[derive(Clone)]

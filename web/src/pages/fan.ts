@@ -124,16 +124,16 @@ export function renderScanStatus(status: ScanStatus): string {
   const phase = status.phase === 'building_albums' ? '正在生成相册' : '正在读取照片与 EXIF'
   return `<main class="scan-status-page">
     <div class="scan-orbit" aria-hidden="true"><span></span></div>
-    <p class="scan-kicker">INITIAL LIBRARY INDEX</p>
-    <h1>正在建立照片索引</h1>
+    <p class="scan-kicker">LIBRARY SYNC</p>
+    <h1>正在同步照片库</h1>
     <p class="scan-phase">${phase}</p>
     <div class="scan-metrics">
       <div><strong>${status.found}</strong><span>已发现 ${status.found} 张</span></div>
-      <div><strong>${status.processed}</strong><span>已处理 ${status.processed} 张</span></div>
+      <div><strong>${status.processed}</strong><span>已校验 ${status.processed} 张</span></div>
       <div><strong>${status.workers}</strong><span>并发线程</span></div>
     </div>
     <p class="scan-meta">${speed} · ${status.elapsed_seconds} 秒 · ${status.errors} 个错误</p>
-    <p class="scan-hint">首次扫描可能需要一些时间，请保持此页面打开；完成后会自动进入相册。</p>
+    <p class="scan-hint">首次建立索引可能需要一些时间；后续同步会复用未变化照片的数据。</p>
   </main>`
 }
 
