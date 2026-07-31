@@ -1,6 +1,6 @@
 use crate::timeline::models::{
     AlbumAiDescription, AnalysisDecision, DailyAlbumBuild, PhotoAnalysis, PhotoCandidate,
-    TimeSource, TimelineAlbum, TimelineAlbumDetail, TimelinePhoto, VisionTags,
+    TimeSource, TimelineAlbum, TimelineAlbumDetail, TimelinePhoto,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
@@ -567,88 +567,6 @@ impl TimelineDb {
         })
     }
 
-    pub fn save_vision_tags(&self, tags: &VisionTags) -> Result<()> {
-        let labels = serde_json::to_string(&tags.labels)?;
-        let scores = serde_json::to_string(&tags.scores)?;
-        self.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO photo_vision_tags (
-                    photo_id, model, input_fingerprint, labels_json, scores_json, analyzed_at, error
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(photo_id, model) DO UPDATE SET
-                    input_fingerprint = excluded.input_fingerprint,
-                    labels_json = excluded.labels_json,
-                    scores_json = excluded.scores_json,
-                    analyzed_at = excluded.analyzed_at,
-                    error = excluded.error",
-                params![
-                    tags.photo_id,
-                    tags.model,
-                    tags.input_fingerprint,
-                    labels,
-                    scores,
-                    tags.analyzed_at,
-                    tags.error,
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn save_vision_error(&self, failed: &VisionTags) -> Result<()> {
-        self.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO photo_vision_tags (
-                    photo_id, model, input_fingerprint, labels_json, scores_json, analyzed_at, error
-                 ) VALUES (?1, ?2, ?3, '[]', '[]', ?4, ?5)
-                 ON CONFLICT(photo_id, model) DO UPDATE SET
-                    input_fingerprint = excluded.input_fingerprint,
-                    analyzed_at = excluded.analyzed_at,
-                    error = excluded.error",
-                params![
-                    failed.photo_id,
-                    failed.model,
-                    failed.input_fingerprint,
-                    failed.analyzed_at,
-                    failed.error,
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn get_vision_tags(&self, photo_id: &str, model: &str) -> Result<Option<VisionTags>> {
-        self.with_connection(|connection| {
-            let raw = connection
-                .query_row(
-                    "SELECT input_fingerprint, labels_json, scores_json, analyzed_at, error
-                     FROM photo_vision_tags WHERE photo_id = ?1 AND model = ?2",
-                    params![photo_id, model],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            raw.map(|(input_fingerprint, labels, scores, analyzed_at, error)| {
-                Ok(VisionTags {
-                    photo_id: photo_id.into(),
-                    model: model.into(),
-                    input_fingerprint,
-                    labels: serde_json::from_str(&labels)?,
-                    scores: serde_json::from_str(&scores)?,
-                    analyzed_at,
-                    error,
-                })
-            })
-            .transpose()
-        })
-    }
 
     pub fn save_ai_description(&self, description: &AlbumAiDescription) -> Result<()> {
         let keywords = serde_json::to_string(&description.keywords)?;
@@ -1276,62 +1194,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn vision_and_ai_cache_values_round_trip() {
-        use crate::timeline::models::{AlbumAiDescription, VisionTags};
-
-        let db = TimelineDb::open_in_memory().expect("db");
-        analyzed_candidate(
-            &db,
-            "photo",
-            "fp-photo",
-            "scan-1",
-            "2024-02-10T09:00:00+08:00",
-        );
-        db.replace_daily_albums(&[album(
-            "auto-day:2024-02-10",
-            NaiveDate::from_ymd_opt(2024, 2, 10).unwrap(),
-            &["photo"],
-        )])
-        .expect("album build");
-
-        let tags = VisionTags {
-            photo_id: "photo".into(),
-            model: "model-v1".into(),
-            input_fingerprint: "vision-fp".into(),
-            labels: vec!["family".into(), "meal".into()],
-            scores: vec![0.9, 0.8],
-            analyzed_at: "2024-02-10T12:00:00Z".into(),
-            error: None,
-        };
-        db.save_vision_tags(&tags).expect("save tags");
-        assert_eq!(
-            db.get_vision_tags("photo", "model-v1").expect("get tags"),
-            Some(tags)
-        );
-
-        let description = AlbumAiDescription {
-            album_id: "auto-day:2024-02-10".into(),
-            input_fingerprint: "ai-fp".into(),
-            model: "vision-model".into(),
-            description: "A family meal.".into(),
-            keywords: vec!["family".into(), "meal".into()],
-            confidence: 0.92,
-            generated_at: "2024-02-10T12:30:00Z".into(),
-            error: None,
-        };
-        db.save_ai_description(&description)
-            .expect("save description");
-        assert_eq!(
-            db.get_ai_description("auto-day:2024-02-10")
-                .expect("get description"),
-            Some(description)
-        );
-        assert_eq!(
-            db.list_albums().expect("albums")[0].description.as_deref(),
-            Some("A family meal.")
-        );
-    }
 
     #[test]
     fn first_ai_failure_is_not_exposed_as_an_empty_description() {

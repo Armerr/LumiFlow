@@ -8,9 +8,8 @@ pub mod models;
 pub mod places;
 pub mod scan;
 pub mod time;
-pub mod vision;
 
-use crate::config::{Config, VisionTagger as VisionTaggerConfig};
+use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use chrono_tz::Tz;
 use db::TimelineDb;
@@ -73,9 +72,7 @@ impl ScanStatus {
     }
 }
 
-fn build_vision_runtime(_config: &Config) -> Result<Option<()>> {
-    Ok(None)
-}
+
 
 
 #[derive(Default)]
@@ -244,8 +241,7 @@ fn rescan_local_blocking(
     }
     let places = build_place_resolver(config, db)?;
     let albums = albums::rebuild_daily_albums(db, timezone, places.as_ref())?;
-    let (enrichment, ai_inputs) =
-        enrichment::enrich_local(config, db, None, "disabled", prepare_ai)?;
+    let (enrichment, ai_inputs) = enrichment::enrich_local(config, db, prepare_ai)?;
     Ok((
         RescanReport { scan, albums_count: albums.len(), enrichment },
         ai_inputs,
@@ -425,23 +421,7 @@ mod ai_scheduling_tests {
 mod tests {
     use super::*;
     use crate::config::{AiConfig, AlbumMode, VisionTagger as VisionTaggerConfig};
-    use crate::timeline::vision::{VisionTag, VisionTagger};
     use std::path::{Path, PathBuf};
-
-    struct FixedTagger;
-
-    impl VisionTagger for FixedTagger {
-        fn model_id(&self) -> &str {
-            "fixed-model"
-        }
-
-        fn tag(&mut self, _thumbnail_path: &Path) -> Result<Vec<VisionTag>> {
-            Ok(vec![VisionTag {
-                label: "garden".into(),
-                score: 1.0,
-            }])
-        }
-    }
 
     struct TestDir(PathBuf);
 

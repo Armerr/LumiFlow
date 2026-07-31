@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 mod generate;
-pub use generate::{decode_image, generate_thumbnail, get_dimensions};
+pub use generate::{generate_thumbnail, get_dimensions};
 
 /// On-demand thumbnail generator with bounded blocking decode concurrency.
 #[derive(Clone)]

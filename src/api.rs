@@ -260,6 +260,12 @@ pub async fn serve_thumbnail_by_id(
         let source = resolve_timeline_photo_path(service, &photo.relative_path)?;
         ThumbnailPool::generate_on_demand(&source, &thumb_path)
             .map_err(|_| StatusCode::NOT_FOUND)?;
+        crate::thumbnail::write_timeline_thumb_fingerprint(
+            &state.config.data_path,
+            &photo.id,
+            &photo.fingerprint,
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
     serve_cached_file(&thumb_path, "image/webp").await
 }

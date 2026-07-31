@@ -107,6 +107,11 @@ pub fn start(
     }
 }
 
+fn should_run_periodic_timeline_rescan(state: crate::timeline::ScanState) -> bool {
+    matches!(state, crate::timeline::ScanState::Ready)
+}
+
+
 /// Start timeline-mode periodic and recursive notify rescans.
 pub fn start_timeline(photos_path: PathBuf, service: Arc<crate::timeline::TimelineService>) {
     let periodic_service = service.clone();
@@ -115,6 +120,10 @@ pub fn start_timeline(photos_path: PathBuf, service: Arc<crate::timeline::Timeli
         interval.tick().await;
         loop {
             interval.tick().await;
+            if !should_run_periodic_timeline_rescan(periodic_service.status().state) {
+                tracing::debug!("skip periodic timeline rescan while initial/active scan is not ready");
+                continue;
+            }
             if let Err(error) = periodic_service.rescan().await {
                 tracing::error!("periodic timeline rescan failed: {error:#}");
             }
@@ -313,4 +322,18 @@ async fn rescan_and_sync(
 
     // Update in-memory manifest
     *manifest_lock.write().await = new_manifest;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_run_periodic_timeline_rescan;
+    use crate::timeline::ScanState;
+
+    #[test]
+    fn periodic_timeline_rescan_only_runs_from_ready_state() {
+        assert!(!should_run_periodic_timeline_rescan(ScanState::Starting));
+        assert!(!should_run_periodic_timeline_rescan(ScanState::Scanning));
+        assert!(!should_run_periodic_timeline_rescan(ScanState::Error));
+        assert!(should_run_periodic_timeline_rescan(ScanState::Ready));
+    }
 }

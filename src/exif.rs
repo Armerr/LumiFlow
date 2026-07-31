@@ -394,9 +394,6 @@ fn parse_inline_tags(value: &str) -> Vec<String> {
         .take(24)
         .collect()
 }
-fn percent(value: f64, max: f64) -> u8 {
-    ((value / max * 100.0).round().clamp(0.0, 100.0)) as u8
-}
 
 #[cfg(test)]
 mod tests {

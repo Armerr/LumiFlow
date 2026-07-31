@@ -6,7 +6,6 @@ use crate::timeline::ai::{AiDescriptionInput, ResponsesAiClient, SelectedPhotoSi
 use crate::timeline::contact_sheet::{render_contact_sheet, representative_indices};
 use crate::timeline::db::TimelineDb;
 use crate::timeline::models::{AlbumAiDescription, TimelinePhoto};
-use crate::timeline::vision::{tag_photo, TagPhotoOutcome, VisionTag, VisionTagger};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Timelike};
 use sha1::{Digest, Sha1};
@@ -14,44 +13,75 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+
 pub fn enrich_local(
     config: &Config,
     db: &TimelineDb,
-    mut tagger: Option<&mut dyn VisionTagger>,
-    tagset_version: &str,
     prepare_ai: bool,
 ) -> Result<(EnrichmentReport, Vec<AiDescriptionInput>)> {
-    if tagger.is_none() && !prepare_ai {
-        return Ok((EnrichmentReport::default(), Vec::new()));
+    if !prepare_ai {
+        let photos = db
+            .list_active_photos()
+            .context("failed to list photos for enrichment")?;
+        let canonical_root = config.photos_path.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve photo root {}",
+                config.photos_path.display()
+            )
+        })?;
+        let mut report = EnrichmentReport::default();
+        for photo in &photos {
+            let thumbnail = timeline_thumb_path(&config.data_path, &photo.id);
+            if timeline_thumb_is_fresh(&config.data_path, &photo.id, &photo.fingerprint) {
+                report.thumbnails_reused += 1;
+                continue;
+            }
+            let generated = resolve_source(&canonical_root, &photo.relative_path).and_then(|source| {
+                ThumbnailPool::generate_on_demand(&source, &thumbnail).and_then(|_| {
+                    write_timeline_thumb_fingerprint(
+                        &config.data_path,
+                        &photo.id,
+                        &photo.fingerprint,
+                    )
+                    .context("failed to write thumbnail fingerprint")
+                })
+            });
+            match generated {
+                Ok(()) => report.thumbnails_generated += 1,
+                Err(error) => {
+                    report.thumbnail_errors += 1;
+                    tracing::warn!(photo_id = %photo.id, error = %error, "timeline thumbnail enrichment failed");
+                }
+            }
+        }
+        return Ok((report, Vec::new()));
     }
+
     let photos = db
         .list_active_photos()
         .context("failed to list photos for enrichment")?;
-    let mut report = EnrichmentReport::default();
-    let mut vision_by_photo = HashMap::with_capacity(photos.len());
     let canonical_root = config.photos_path.canonicalize().with_context(|| {
         format!(
             "failed to resolve photo root {}",
             config.photos_path.display()
         )
     })?;
-
+    let mut report = EnrichmentReport::default();
     for photo in &photos {
         let thumbnail = timeline_thumb_path(&config.data_path, &photo.id);
         if timeline_thumb_is_fresh(&config.data_path, &photo.id, &photo.fingerprint) {
             report.thumbnails_reused += 1;
         } else {
-            let generated =
-                resolve_source(&canonical_root, &photo.relative_path).and_then(|source| {
-                    ThumbnailPool::generate_on_demand(&source, &thumbnail).and_then(|_| {
-                        write_timeline_thumb_fingerprint(
-                            &config.data_path,
-                            &photo.id,
-                            &photo.fingerprint,
-                        )
-                        .context("failed to write thumbnail fingerprint")
-                    })
-                });
+            let generated = resolve_source(&canonical_root, &photo.relative_path).and_then(|source| {
+                ThumbnailPool::generate_on_demand(&source, &thumbnail).and_then(|_| {
+                    write_timeline_thumb_fingerprint(
+                        &config.data_path,
+                        &photo.id,
+                        &photo.fingerprint,
+                    )
+                    .context("failed to write thumbnail fingerprint")
+                })
+            });
             match generated {
                 Ok(()) => report.thumbnails_generated += 1,
                 Err(error) => {
@@ -61,36 +91,6 @@ pub fn enrich_local(
                 }
             }
         }
-
-        if let Some(active_tagger) = tagger.as_deref_mut() {
-            match tag_photo(
-                db,
-                active_tagger,
-                &photo.id,
-                &photo.fingerprint,
-                &thumbnail,
-                &photo.fingerprint,
-                tagset_version,
-            ) {
-                Ok(TagPhotoOutcome::Tagged(tags)) => {
-                    report.vision_tagged += 1;
-                    vision_by_photo.insert(photo.id.clone(), tags);
-                }
-                Ok(TagPhotoOutcome::Cached(tags)) => {
-                    report.vision_cached += 1;
-                    vision_by_photo.insert(photo.id.clone(), tags);
-                }
-                Ok(TagPhotoOutcome::Disabled) => {}
-                Err(error) => {
-                    report.vision_errors += 1;
-                    tracing::warn!(photo_id = %photo.id, error = %error, "timeline vision enrichment failed");
-                }
-            }
-        }
-    }
-
-    if !prepare_ai {
-        return Ok((report, Vec::new()));
     }
 
     let camera_by_photo = db
@@ -99,7 +99,6 @@ pub fn enrich_local(
         .into_iter()
         .map(|(id, make, model)| (id, camera_name(make.as_deref(), model.as_deref())))
         .collect::<HashMap<_, _>>();
-    let model = tagger.as_deref().map(VisionTagger::model_id);
     let mut inputs = Vec::new();
     for album in db
         .list_albums()
@@ -136,29 +135,24 @@ pub fn enrich_local(
         }
         let signatures = selected
             .iter()
-            .map(|photo| {
-                let vision_input_fingerprint = model
-                    .and_then(|model| db.get_vision_tags(&photo.id, model).ok().flatten())
-                    .filter(|tags| tags.error.is_none())
-                    .map(|tags| tags.input_fingerprint);
-                SelectedPhotoSignature {
-                    photo_id: photo.id.clone(),
-                    photo_fingerprint: photo.fingerprint.clone(),
-                    vision_input_fingerprint,
-                }
+            .map(|photo| SelectedPhotoSignature {
+                photo_id: photo.id.clone(),
+                photo_fingerprint: photo.fingerprint.clone(),
+                vision_input_fingerprint: None,
             })
             .collect();
         inputs.push(AiDescriptionInput {
             album: detail.album,
             time_range: time_range(&detail.photos),
             camera_summary: camera_summary(&detail.photos, &camera_by_photo),
-            vision_tag_summary: vision_summary(&detail.photos, &vision_by_photo, db, model),
+            vision_tag_summary: Vec::new(),
             selected_photos: signatures,
             contact_sheet_path: sheet,
         });
     }
     Ok((report, inputs))
 }
+
 fn resolve_source(root: &Path, relative_path: &str) -> Result<PathBuf> {
     let source = root.join(relative_path);
     let canonical = source
@@ -283,42 +277,6 @@ fn time_range(photos: &[TimelinePhoto]) -> Option<String> {
     ))
 }
 
-fn vision_summary(
-    photos: &[TimelinePhoto],
-    current: &HashMap<String, Vec<VisionTag>>,
-    db: &TimelineDb,
-    model: Option<&str>,
-) -> Vec<String> {
-    let mut totals = HashMap::<String, f32>::new();
-    for photo in photos {
-        if let Some(tags) = current.get(&photo.id) {
-            for tag in tags {
-                *totals.entry(tag.label.clone()).or_default() += tag.score;
-            }
-        } else if let Some(model) = model {
-            if let Ok(Some(tags)) = db.get_vision_tags(&photo.id, model) {
-                if tags.error.is_none() {
-                    for (label, score) in tags.labels.into_iter().zip(tags.scores) {
-                        *totals.entry(label).or_default() += score;
-                    }
-                }
-            }
-        }
-    }
-    let mut totals = totals.into_iter().collect::<Vec<_>>();
-    totals.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    totals.truncate(10);
-    totals
-        .into_iter()
-        .map(|(label, score)| format!("{label} ({score:.2})"))
-        .collect()
-}
-
 fn sha1_hex(value: &[u8]) -> String {
     hex_digest(Sha1::digest(value))
 }
@@ -359,7 +317,6 @@ mod tests {
     use crate::timeline::models::{
         AnalysisDecision, DailyAlbumBuild, PhotoAnalysis, PhotoCandidate, TimeSource, TimelineAlbum,
     };
-    use crate::timeline::vision::VisionTag;
     use chrono::NaiveDate;
     use image::{ImageBuffer, Rgb};
     use serde_json::json;
@@ -391,49 +348,6 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    struct RecordingTagger {
-        calls: Vec<PathBuf>,
-        fail_photo: Option<String>,
-    }
-
-    impl VisionTagger for RecordingTagger {
-        fn model_id(&self) -> &str {
-            "test-model"
-        }
-
-        fn tag(&mut self, thumbnail: &Path) -> Result<Vec<VisionTag>> {
-            self.calls.push(thumbnail.to_owned());
-            if self
-                .fail_photo
-                .as_deref()
-                .is_some_and(|id| thumbnail.file_stem().and_then(|stem| stem.to_str()) == Some(id))
-            {
-                anyhow::bail!("intentional tag failure");
-            }
-            let id = thumbnail
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or_default();
-            let tags = match id {
-                "early" => vec![
-                    VisionTag {
-                        label: "garden".into(),
-                        score: 0.9,
-                    },
-                    VisionTag {
-                        label: "people".into(),
-                        score: 0.4,
-                    },
-                ],
-                _ => vec![VisionTag {
-                    label: "garden".into(),
-                    score: 0.8,
-                }],
-            };
-            Ok(tags)
         }
     }
 
@@ -505,13 +419,8 @@ mod tests {
         db.replace_daily_albums(&[album("day", &["early", "broken", "late"])])
             .expect("album");
         let config = config(photos.path(), data.path());
-        let mut tagger = RecordingTagger {
-            calls: vec![],
-            fail_photo: Some("broken".into()),
-        };
 
-        let (first, inputs) = enrich_local(&config, &db, None, "unused", true)
-            .expect("first enrichment");
+        let (first, inputs) = enrich_local(&config, &db, true).expect("first enrichment");
 
         assert_eq!(first.thumbnails_generated, 3);
         assert_eq!(first.thumbnails_reused, 0);
@@ -522,8 +431,7 @@ mod tests {
         assert_eq!(input.time_range.as_deref(), Some("09:00–11:00"));
         assert_eq!(input.camera_summary, ["Canon R5 × 2", "Nikon Z8 × 1"]);
 
-        let (second, _) = enrich_local(&config, &db, None, "unused", true)
-            .expect("second enrichment");
+        let (second, _) = enrich_local(&config, &db, true).expect("second enrichment");
         assert_eq!(second.thumbnails_reused, 3);
         assert_eq!(second.thumbnails_generated, 0);
         assert_eq!(second.contact_sheets_generated, 0);
@@ -560,8 +468,6 @@ mod tests {
         let (report, inputs) = enrich_local(
             &config(photos.path(), data.path()),
             &db,
-            None,
-            "unused",
             true,
         )
         .expect("isolated enrichment failure");
@@ -595,7 +501,7 @@ mod tests {
             .expect("album");
         let config = config(photos.path(), data.path());
 
-        let (report, inputs) = enrich_local(&config, &db, None, "unused", true).expect("enrich");
+        let (report, inputs) = enrich_local(&config, &db, true).expect("enrich");
         assert_eq!(inputs[0].selected_photos.len(), 36);
         let expected = crate::timeline::contact_sheet::representative_indices(50, 36)
             .into_iter()
@@ -633,7 +539,7 @@ mod tests {
             "",
         );
         let config = config(photos.path(), data.path());
-        let (report, inputs) = enrich_local(&config, &db, None, "unused", false).expect("disabled");
+        let (report, inputs) = enrich_local(&config, &db, false).expect("disabled");
         assert_eq!(report, EnrichmentReport::default());
         assert!(inputs.is_empty());
         assert!(!data.path().join("thumbs").exists());
