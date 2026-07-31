@@ -275,6 +275,16 @@ impl TimelineDb {
         })
     }
 
+    pub fn has_active_photos(&self) -> Result<bool> {
+        self.with_connection(|connection| {
+            Ok(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM photos WHERE status = 'active')",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
     pub fn mark_scan_completed(&self) -> Result<()> {
         self.with_connection(|connection| {
             connection.execute(

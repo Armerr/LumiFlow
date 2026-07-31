@@ -65,4 +65,5 @@ describe('startup scan polling', () => {
     expect(container.innerHTML).toContain('暂无相册')
     page.unmount()
   })
+
 })

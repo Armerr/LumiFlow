@@ -27,7 +27,7 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
     timer = null
   }
 
-  const loadAlbums = async (container: HTMLElement): Promise<void> => {
+  const loadAlbums = async (container: HTMLElement): Promise<boolean> => {
     if (disposed) return
 
     const query = albumFilterQuery(currentFilter)
@@ -37,16 +37,16 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
       router.setAlbums(data)
     } catch {
       container.innerHTML = '<div class="error-state"><p>无法加载相册</p></div>'
-      return
+      return false
     }
-    if (disposed) return
+    if (disposed) return false
 
     scene?.dispose()
     scene = null
 
     if (data.albums.length === 0) {
       container.innerHTML = renderFilteredEmpty()
-      return
+      return false
     }
 
     container.innerHTML = '<div class="fan-filter-bar" id="fan-filter-bar"></div>'
@@ -66,6 +66,7 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
         },
       })
     }
+    return true
   }
 
   return {
@@ -86,6 +87,8 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
           return
         }
         if (status.state !== 'ready') {
+          // Keep an existing index usable while a watcher or recovery scan runs.
+          if (status.has_index && await loadAlbums(container)) return
           container.innerHTML = renderScanStatus(status)
           timer = setTimeout(() => { void load() }, 1000)
           return

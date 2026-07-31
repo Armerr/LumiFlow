@@ -44,6 +44,7 @@ pub struct ScanStatus {
     pub processed: usize,
     pub errors: usize,
     pub workers: usize,
+    pub has_index: bool,
     pub elapsed_seconds: u64,
     pub error: Option<String>,
     #[serde(skip)]
@@ -59,6 +60,7 @@ impl ScanStatus {
             processed: 0,
             errors: 0,
             workers,
+            has_index: false,
             elapsed_seconds: 0,
             error: None,
             started_at: None,
@@ -94,6 +96,7 @@ pub struct TimelineService {
     ai_schedule: Arc<AiScheduleState>,
     scan_lock: Mutex<()>,
     status: Arc<StdMutex<ScanStatus>>,
+    has_existing_index: bool,
 }
 
 impl TimelineService {
@@ -101,6 +104,11 @@ impl TimelineService {
         let timezone = parse_timezone(&config.timeline_timezone)?;
         let db = TimelineDb::open(config.data_path.join("lumiflow.sqlite"))?;
         let has_completed_scan = db.has_completed_scan()?;
+        let has_existing_index = has_completed_scan || db.has_active_photos()?;
+        if has_existing_index && !has_completed_scan {
+            // Databases created before the completion marker still contain a usable index.
+            db.mark_scan_completed()?;
+        }
         let ai = config
             .ai
             .enabled
@@ -115,16 +123,18 @@ impl TimelineService {
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
-            status: Arc::new(StdMutex::new(if has_completed_scan {
+            status: Arc::new(StdMutex::new(if has_existing_index {
                 ScanStatus {
                     state: ScanState::Ready,
                     phase: "ready".into(),
                     workers,
+                    has_index: true,
                     ..ScanStatus::starting(workers)
                 }
             } else {
                 ScanStatus::starting(workers)
             })),
+            has_existing_index,
         }))
     }
 
@@ -146,6 +156,7 @@ impl TimelineService {
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
             status: Arc::new(StdMutex::new(ScanStatus::starting(workers))),
+            has_existing_index: false,
         })
     }
 
@@ -180,6 +191,7 @@ impl TimelineService {
                 state: ScanState::Scanning,
                 phase: "indexing".into(),
                 workers: config.scan_workers,
+                has_index: self.has_existing_index,
                 started_at: Some(Instant::now()),
                 ..ScanStatus::starting(config.scan_workers)
             };

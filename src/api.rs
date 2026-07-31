@@ -67,6 +67,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "processed": 0,
             "errors": 0,
             "workers": 0,
+            "has_index": false,
             "elapsed_seconds": 0,
             "error": null,
         })),

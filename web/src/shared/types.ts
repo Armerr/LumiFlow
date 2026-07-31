@@ -28,6 +28,7 @@ export interface ScanStatus {
   processed: number
   errors: number
   workers: number
+  has_index?: boolean
   elapsed_seconds: number
   error?: string | null
 }
