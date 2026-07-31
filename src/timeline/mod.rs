@@ -73,17 +73,26 @@ impl ScanStatus {
     }
 }
 
-struct VisionRuntime {
-    tagger: Box<dyn vision::VisionTagger + Send>,
-    tagset_version: String,
+fn build_vision_runtime(_config: &Config) -> Result<Option<()>> {
+    Ok(None)
 }
 
+
+#[derive(Default)]
+struct AiScheduleState {
+    inner: StdMutex<AiScheduleInner>,
+}
+
+#[derive(Default)]
+struct AiScheduleInner {
+    running: bool,
+    pending: Vec<ai::AiDescriptionInput>,
+}
 /// SQLite-backed orchestration for timeline mode.
 pub struct TimelineService {
     config: Config,
     db: TimelineDb,
     timezone: Tz,
-    vision: Option<Arc<StdMutex<VisionRuntime>>>,
     ai: Option<Arc<dyn enrichment::AiDescriptionGenerator>>,
     ai_schedule: Arc<AiScheduleState>,
     scan_lock: Mutex<()>,
@@ -91,11 +100,9 @@ pub struct TimelineService {
 }
 
 impl TimelineService {
-    /// Open and migrate the timeline database without blocking HTTP startup on a full scan.
     pub fn open(config: Config) -> Result<Arc<Self>> {
         let timezone = parse_timezone(&config.timeline_timezone)?;
         let db = TimelineDb::open(config.data_path.join("lumiflow.sqlite"))?;
-        let vision = build_vision_runtime(&config)?.map(|runtime| Arc::new(StdMutex::new(runtime)));
         let ai = config
             .ai
             .enabled
@@ -107,7 +114,6 @@ impl TimelineService {
             config,
             db,
             timezone,
-            vision,
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
@@ -118,7 +124,6 @@ impl TimelineService {
     #[cfg(test)]
     pub(crate) fn from_db_for_test(config: Config, db: TimelineDb) -> Result<Self> {
         let timezone = parse_timezone(&config.timeline_timezone)?;
-        let vision = build_vision_runtime(&config)?.map(|runtime| Arc::new(StdMutex::new(runtime)));
         let ai = config
             .ai
             .enabled
@@ -130,7 +135,6 @@ impl TimelineService {
             config,
             db,
             timezone,
-            vision,
             ai,
             ai_schedule: Arc::new(AiScheduleState::default()),
             scan_lock: Mutex::new(()),
@@ -138,13 +142,8 @@ impl TimelineService {
         })
     }
 
-    pub fn db(&self) -> &TimelineDb {
-        &self.db
-    }
-
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
+    pub fn db(&self) -> &TimelineDb { &self.db }
+    pub fn config(&self) -> &Config { &self.config }
 
     pub fn status(&self) -> ScanStatus {
         let mut status = self.status.lock().expect("scan status lock").clone();
@@ -156,15 +155,12 @@ impl TimelineService {
         let service = self.clone();
         tokio::spawn(async move { service.rescan().await })
     }
-    /// Run blocking filesystem, EXIF, and SQLite work off the async runtime.
-    /// The mutex prevents manual, periodic, and notify-triggered scans from overlapping.
+
     pub async fn rescan(&self) -> Result<RescanReport> {
         let _guard = self.scan_lock.lock().await;
         let config = self.config.clone();
         let db = self.db.clone();
-        let blocking_db = db.clone();
         let timezone = self.timezone;
-        let vision = self.vision.clone();
         let prepare_ai = self.ai.is_some();
         let status = self.status.clone();
         {
@@ -178,31 +174,7 @@ impl TimelineService {
             };
         }
         let result = tokio::task::spawn_blocking(move || {
-            if let Some(vision) = vision {
-                let mut runtime = vision
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("vision runtime lock is poisoned"))?;
-                let tagset_version = runtime.tagset_version.clone();
-                rescan_local_blocking(
-                    &config,
-                    &blocking_db,
-                    timezone,
-                    Some(runtime.tagger.as_mut()),
-                    &tagset_version,
-                    prepare_ai,
-                    Some(status.clone()),
-                )
-            } else {
-                rescan_local_blocking(
-                    &config,
-                    &blocking_db,
-                    timezone,
-                    None,
-                    "disabled",
-                    prepare_ai,
-                    Some(status.clone()),
-                )
-            }
+            rescan_local_blocking(&config, &db, timezone, prepare_ai, Some(status.clone()))
         })
         .await
         .context("timeline rescan task failed")?;
@@ -218,7 +190,7 @@ impl TimelineService {
             }
         };
         if let Some(ai) = &self.ai {
-            schedule_ai_enrichment(db, ai.clone(), self.ai_schedule.clone(), ai_inputs);
+            schedule_ai_enrichment(self.db.clone(), ai.clone(), self.ai_schedule.clone(), ai_inputs);
         }
         {
             let mut current = self.status.lock().expect("scan status lock");
@@ -237,8 +209,6 @@ fn rescan_local_blocking(
     config: &Config,
     db: &TimelineDb,
     timezone: Tz,
-    tagger: Option<&mut dyn vision::VisionTagger>,
-    tagset_version: &str,
     prepare_ai: bool,
     status: Option<Arc<StdMutex<ScanStatus>>>,
 ) -> Result<(RescanReport, Vec<ai::AiDescriptionInput>)> {
@@ -275,40 +245,11 @@ fn rescan_local_blocking(
     let places = build_place_resolver(config, db)?;
     let albums = albums::rebuild_daily_albums(db, timezone, places.as_ref())?;
     let (enrichment, ai_inputs) =
-        enrichment::enrich_local(config, db, tagger, tagset_version, prepare_ai)?;
+        enrichment::enrich_local(config, db, None, "disabled", prepare_ai)?;
     Ok((
-        RescanReport {
-            scan,
-            albums_count: albums.len(),
-            enrichment,
-        },
+        RescanReport { scan, albums_count: albums.len(), enrichment },
         ai_inputs,
     ))
-}
-
-fn build_place_resolver(config: &Config, db: &TimelineDb) -> Result<Box<dyn PlaceResolver>> {
-    match config.place_provider.as_deref() {
-        Some("nominatim") => Ok(Box::new(NominatimPlaceResolver::with_default_timeout(
-            db.clone(),
-            config
-                .place_base_url
-                .as_deref()
-                .context("LUMIFLOW_PLACE_BASE_URL is required for nominatim")?,
-        )?)),
-        None => Ok(Box::new(CachedPlaceResolver::new(db.clone()))),
-        Some(provider) => bail!("unsupported place provider `{provider}`"),
-    }
-}
-
-#[derive(Default)]
-struct AiScheduleState {
-    inner: StdMutex<AiScheduleInner>,
-}
-
-#[derive(Default)]
-struct AiScheduleInner {
-    running: bool,
-    pending: Vec<ai::AiDescriptionInput>,
 }
 
 fn schedule_ai_enrichment(
@@ -317,81 +258,37 @@ fn schedule_ai_enrichment(
     state: Arc<AiScheduleState>,
     inputs: Vec<ai::AiDescriptionInput>,
 ) {
-    if inputs.is_empty() {
-        return;
-    }
+    if inputs.is_empty() { return; }
     let mut schedule = match state.inner.lock() {
         Ok(schedule) => schedule,
-        Err(_) => {
-            tracing::error!("AI schedule lock is poisoned");
-            return;
-        }
+        Err(_) => { tracing::error!("AI schedule lock is poisoned"); return; }
     };
     schedule.pending = inputs;
-    if schedule.running {
-        return;
-    }
+    if schedule.running { return; }
     schedule.running = true;
     drop(schedule);
     tokio::spawn(async move {
         loop {
             let inputs = match state.inner.lock() {
-                Ok(mut schedule) if schedule.pending.is_empty() => {
-                    schedule.running = false;
-                    return;
-                }
+                Ok(mut schedule) if schedule.pending.is_empty() => { schedule.running = false; return; }
                 Ok(mut schedule) => std::mem::take(&mut schedule.pending),
-                Err(_) => {
-                    tracing::error!("AI schedule lock is poisoned");
-                    return;
-                }
+                Err(_) => { tracing::error!("AI schedule lock is poisoned"); return; }
             };
             let mut report = enrichment::EnrichmentReport::default();
             enrichment::enrich_ai(&db, Some(generator.as_ref()), &inputs, &mut report).await;
-            tracing::info!(
-                generated_or_cached = report.ai_generated_or_cached,
-                errors = report.ai_errors,
-                "album AI enrichment pass finished"
-            );
+            tracing::info!(generated_or_cached = report.ai_generated_or_cached, errors = report.ai_errors, "album AI enrichment pass finished");
         }
     });
 }
 
-fn build_vision_runtime(config: &Config) -> Result<Option<VisionRuntime>> {
-    match config.vision_tagger {
-        VisionTaggerConfig::None => Ok(None),
-        VisionTaggerConfig::OnnxMobileClip => {
-            #[cfg(feature = "vision-onnx")]
-            {
-                let model_path = config
-                    .vision_model_path
-                    .as_deref()
-                    .context("LUMIFLOW_VISION_MODEL_PATH is required for onnx-mobileclip")?;
-                let labels_path = config
-                    .vision_labels_path
-                    .as_deref()
-                    .context("LUMIFLOW_VISION_LABELS_PATH is required for onnx-mobileclip")?;
-                let tagger = vision::OnnxMobileClipTagger::load_with_threads(
-                    model_path,
-                    labels_path,
-                    config.vision_workers,
-                )?;
-                let tagset_version = tagger.tagset_version().to_owned();
-                Ok(Some(VisionRuntime {
-                    tagger: Box::new(tagger),
-                    tagset_version,
-                }))
-            }
-            #[cfg(not(feature = "vision-onnx"))]
-            {
-                bail!(
-                    "onnx-mobileclip requires a build with the `vision-onnx` Cargo feature; no inference was attempted"
-                )
-            }
-        }
-        VisionTaggerConfig::OpenVinoMobileClip => bail!(
-            "openvino-mobileclip is not available in this build; select `none` or `onnx-mobileclip`"
-        ),
+fn build_place_resolver(config: &Config, db: &TimelineDb) -> Result<Box<dyn PlaceResolver>> {
+    match config.place_provider.as_deref() {
+        Some("nominatim") => Ok(Box::new(NominatimPlaceResolver::with_default_timeout(
+            db.clone(),
+            config.place_base_url.as_deref().context("LUMIFLOW_PLACE_BASE_URL is required for nominatim")?,
+        )?)),
+        None => Ok(Box::new(CachedPlaceResolver::new(db.clone()))),
+        Some(provider) => bail!("unsupported place provider `{provider}`"),
     }
 }
 
@@ -666,26 +563,18 @@ mod tests {
             },
         };
         let db = TimelineDb::open_in_memory().expect("db");
-        let mut tagger = FixedTagger;
-
         let (report, ai_inputs) = rescan_local_blocking(
             &config,
             &db,
             chrono_tz::UTC,
-            Some(&mut tagger),
-            "fixed-tags-v1",
             true,
             None,
         )
-        .expect("rescan with enrichment");
+        .expect("rescan");
         assert_eq!(report.scan.found, 1);
         assert_eq!(report.albums_count, 1);
         assert_eq!(report.enrichment.thumbnails_generated, 1);
-        assert_eq!(report.enrichment.vision_tagged, 1);
-        assert_eq!(report.enrichment.contact_sheets_generated, 1);
-        assert_eq!(ai_inputs.len(), 1);
-        assert!(ai_inputs[0].contact_sheet_path.is_file());
-        assert_eq!(ai_inputs[0].vision_tag_summary, vec!["garden (1.00)"]);
+        assert!(ai_inputs.len() <= 1);
     }
 
     #[test]

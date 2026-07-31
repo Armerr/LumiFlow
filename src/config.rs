@@ -12,8 +12,6 @@ pub enum AlbumMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum VisionTagger {
     None,
-    OnnxMobileClip,
-    OpenVinoMobileClip,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -144,14 +142,8 @@ fn parse_album_mode() -> anyhow::Result<AlbumMode> {
 
 fn parse_vision_tagger() -> anyhow::Result<VisionTagger> {
     match env::var("LUMIFLOW_VISION_TAGGER") {
-        Ok(value) => match value.as_str() {
-            "none" => Ok(VisionTagger::None),
-            "onnx-mobileclip" => Ok(VisionTagger::OnnxMobileClip),
-            "openvino-mobileclip" => Ok(VisionTagger::OpenVinoMobileClip),
-            _ => bail!(
-                "unsupported LUMIFLOW_VISION_TAGGER `{value}`; expected `none`, `onnx-mobileclip`, or `openvino-mobileclip`"
-            ),
-        },
+        Ok(value) if value == "none" => Ok(VisionTagger::None),
+        Ok(value) => bail!("vision tagging is no longer supported; LUMIFLOW_VISION_TAGGER `{value}` is unrecognised"),
         Err(env::VarError::NotPresent) => Ok(VisionTagger::None),
         Err(error) => Err(error).context("failed to read LUMIFLOW_VISION_TAGGER"),
     }
@@ -329,10 +321,6 @@ mod tests {
         env::set_var("LUMIFLOW_CALENDAR_REGION", "FR_COMMON");
         env::set_var("LUMIFLOW_PLACE_PROVIDER", "nominatim");
         env::set_var("LUMIFLOW_PLACE_BASE_URL", "https://nominatim.example.test");
-        env::set_var("LUMIFLOW_VISION_TAGGER", "onnx-mobileclip");
-        env::set_var("LUMIFLOW_VISION_MODEL_PATH", "/models/mobileclip.onnx");
-        env::set_var("LUMIFLOW_VISION_LABELS_PATH", "/models/labels.json");
-        env::set_var("LUMIFLOW_VISION_WORKERS", "3");
         env::set_var("LUMIFLOW_AI_ENABLED", "true");
         env::set_var("LUMIFLOW_AI_PROVIDER", "openai-compatible");
         env::set_var("LUMIFLOW_AI_BASE_URL", "https://example.invalid/v1");
@@ -349,16 +337,10 @@ mod tests {
             config.place_base_url.as_deref(),
             Some("https://nominatim.example.test")
         );
-        assert_eq!(config.vision_tagger, VisionTagger::OnnxMobileClip);
-        assert_eq!(
-            config.vision_model_path.as_deref(),
-            Some(std::path::Path::new("/models/mobileclip.onnx"))
-        );
-        assert_eq!(
-            config.vision_labels_path.as_deref(),
-            Some(std::path::Path::new("/models/labels.json"))
-        );
-        assert_eq!(config.vision_workers, 3);
+        assert_eq!(config.vision_tagger, VisionTagger::None);
+        assert_eq!(config.vision_model_path, None);
+        assert_eq!(config.vision_labels_path, None);
+        assert_eq!(config.vision_workers, 1);
         assert!(config.ai.enabled);
         assert_eq!(
             config.ai.base_url.as_deref(),
@@ -430,7 +412,7 @@ mod tests {
 
         let error = Config::from_env().expect_err("invalid vision provider must fail");
         let message = error.to_string();
-        assert!(message.contains("unsupported LUMIFLOW_VISION_TAGGER `mobileclip_onnx`"));
-        assert!(message.contains("`onnx-mobileclip`"));
+        assert!(message.contains("LUMIFLOW_VISION_TAGGER `mobileclip_onnx`"));
+        assert!(message.contains("no longer supported"));
     }
 }

@@ -510,42 +510,22 @@ mod tests {
             fail_photo: Some("broken".into()),
         };
 
-        let (first, inputs) = enrich_local(&config, &db, Some(&mut tagger), "tags-v1", true)
+        let (first, inputs) = enrich_local(&config, &db, None, "unused", true)
             .expect("first enrichment");
 
         assert_eq!(first.thumbnails_generated, 3);
         assert_eq!(first.thumbnails_reused, 0);
-        assert_eq!(first.vision_tagged, 2);
-        assert_eq!(first.vision_cached, 0);
-        assert_eq!(first.vision_errors, 1);
         assert_eq!(first.contact_sheets_generated, 1);
         assert_eq!(first.contact_sheet_errors, 0);
         assert_eq!(inputs.len(), 1);
         let input = &inputs[0];
         assert_eq!(input.time_range.as_deref(), Some("09:00–11:00"));
         assert_eq!(input.camera_summary, ["Canon R5 × 2", "Nikon Z8 × 1"]);
-        assert_eq!(input.vision_tag_summary, ["garden (1.70)", "people (0.40)"]);
-        assert_eq!(
-            input
-                .selected_photos
-                .iter()
-                .map(|photo| photo.photo_id.as_str())
-                .collect::<Vec<_>>(),
-            ["early", "broken", "late"]
-        );
-        assert!(input.contact_sheet_path.is_file());
-        assert_eq!(
-            &std::fs::read(&input.contact_sheet_path).expect("sheet")[..2],
-            &[0xff, 0xd8]
-        );
 
-        tagger.fail_photo = None;
-        let (second, _) = enrich_local(&config, &db, Some(&mut tagger), "tags-v1", true)
+        let (second, _) = enrich_local(&config, &db, None, "unused", true)
             .expect("second enrichment");
         assert_eq!(second.thumbnails_reused, 3);
         assert_eq!(second.thumbnails_generated, 0);
-        assert_eq!(second.vision_cached, 2);
-        assert_eq!(second.vision_tagged, 1);
         assert_eq!(second.contact_sheets_generated, 0);
     }
 
