@@ -150,6 +150,7 @@ services:
 
 ```yaml
 environment:
+  LUMIFLOW_PASSWORD: "请设置强密码"
   LUMIFLOW_ALBUM_MODE: timeline
   LUMIFLOW_TIMELINE_TIMEZONE: Asia/Shanghai
   LUMIFLOW_CALENDAR_REGION: CN_COMMON

@@ -57,6 +57,35 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    password: String,
+}
+
+pub async fn auth_status(headers: HeaderMap) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": crate::auth::enabled(),
+        "authenticated": crate::auth::authenticate(&headers),
+    }))
+}
+
+pub async fn login(Json(request): Json<LoginRequest>) -> Result<(HeaderMap, Json<serde_json::Value>), StatusCode> {
+    if !crate::auth::enabled() || crate::auth::password_matches(&request.password) {
+        let mut headers = HeaderMap::new();
+        if crate::auth::enabled() {
+            headers.insert(header::SET_COOKIE, crate::auth::session_cookie());
+        }
+        return Ok((headers, Json(serde_json::json!({ "status": "ok" }))));
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+pub async fn logout() -> (HeaderMap, Json<serde_json::Value>) {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, crate::auth::clear_session_cookie());
+    (headers, Json(serde_json::json!({ "status": "ok" })))
+}
+
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     match &state.timeline {
         Some(service) => Json(serde_json::to_value(service.status()).unwrap_or_default()),

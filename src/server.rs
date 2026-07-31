@@ -10,6 +10,7 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::middleware::{self, Next};
 use axum::Router;
 use regex::Regex;
 use serde::Deserialize;
@@ -91,7 +92,7 @@ fn build_router(state: SharedState) -> Router {
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(Any);
 
-    Router::new()
+    let protected = Router::new()
         // API routes
         .route("/api/albums", get(api::list_albums))
         .route("/api/status", get(api::status))
@@ -105,9 +106,24 @@ fn build_router(state: SharedState) -> Router {
         .route("/api/exif/{*path}", get(api::serve_exif))
         // Photo serving
         .route("/api/photos/{*path}", get(serve_photo))
+        .route_layer(middleware::from_fn(require_auth));
+
+    Router::new()
+        .route("/api/auth/status", get(api::auth_status))
+        .route("/api/auth/login", axum::routing::post(api::login))
+        .route("/api/auth/logout", axum::routing::post(api::logout))
+        .merge(protected)
         .fallback(get(serve_frontend))
         .layer(cors)
         .with_state(state)
+}
+
+async fn require_auth(request: axum::http::Request<Body>, next: Next) -> Response {
+    if crate::auth::authenticate(request.headers()) {
+        next.run(request).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
 }
 
 // --- Photo serving ---
