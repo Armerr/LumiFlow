@@ -21,7 +21,7 @@ export function albumPresentation(album: Pick<Album, 'name' | 'date_start' | 'pl
 function formatAlbumDate(value: string | null | undefined): string {
   if (!value) return ''
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
-  return match ? `${match[1]}.${match[2]}.${match[3]}` : value
+  return match ? `${match[1].slice(2)}${match[2]}${match[3]}` : value
 }
 
 export interface AlbumFilter {

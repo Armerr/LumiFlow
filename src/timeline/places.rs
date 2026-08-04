@@ -322,6 +322,7 @@ mod tests {
             width: 1,
             height: 1,
             size_bytes: 1,
+            mtime_ns: 1_704_067_200_000_000_000,
             format: "JPEG".into(),
             taken_at: None,
             time_source: TimeSource::Unknown,

@@ -10,7 +10,7 @@ describe('album presentation', () => {
       description: '午后的步行、街景与短暂停留。',
       photo_count: 10,
     })).toEqual({
-      metadata: '2026.07.28 · 东京',
+      metadata: '260728 · 东京',
       summary: '午后的步行、街景与短暂停留。',
     })
   })
@@ -21,7 +21,7 @@ describe('album presentation', () => {
       date_start: '2026-07-28',
       photo_count: 12,
     })).toEqual({
-      metadata: '2026.07.28',
+      metadata: '260728',
       summary: '12 张照片',
     })
   })

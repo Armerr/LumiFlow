@@ -376,11 +376,7 @@ impl TimelineDb {
             )?;
 
             for build in albums {
-                let album_type = if build.album.id.starts_with("unknown-date") {
-                    "unknown_date"
-                } else {
-                    "auto_day"
-                };
+                let album_type = "auto_day";
                 let photo_count = i64::try_from(build.photo_ids.len())
                     .context("album photo count exceeds SQLite")?;
                 anyhow::ensure!(
@@ -443,7 +439,7 @@ impl TimelineDb {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, relative_path, filename, width, height, size_bytes,
-                        extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
+                        mtime_ns, extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
                  FROM photos
                  WHERE status = 'active'
                  ORDER BY taken_at IS NULL, taken_at, relative_path, id",
@@ -511,7 +507,7 @@ impl TimelineDb {
 
             let mut statement = connection.prepare(
                 "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
-                        p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
+                        p.mtime_ns, p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
                  FROM album_photos ap
                  JOIN photos p ON p.id = ap.photo_id
                  WHERE ap.album_id = ?1 AND p.status = 'active'
@@ -550,7 +546,7 @@ impl TimelineDb {
             let date_where = date_filter_clause(&filter);
             let sql = format!(
                 "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
-                        p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
+                        p.mtime_ns, p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
                  FROM album_photos ap
                  JOIN photos p ON p.id = ap.photo_id
                  WHERE ap.album_id = ?1 AND p.status = 'active'{date_where}
@@ -572,7 +568,7 @@ impl TimelineDb {
             Ok(connection
                 .query_row(
                     "SELECT id, relative_path, filename, width, height, size_bytes,
-                            extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
+                            mtime_ns, extension, taken_at, time_source, fingerprint, gps_lat, gps_lon
                      FROM photos WHERE id = ?1 AND status = 'active'",
                     [id],
                     map_photo,
@@ -838,7 +834,7 @@ fn map_photo(row: &Row<'_>) -> rusqlite::Result<TimelinePhoto> {
     let width: Option<i64> = row.get(3)?;
     let height: Option<i64> = row.get(4)?;
     let size_bytes: i64 = row.get(5)?;
-    let time_source: String = row.get(8)?;
+    let time_source: String = row.get(9)?;
     Ok(TimelinePhoto {
         id: row.get(0)?,
         relative_path: row.get(1)?,
@@ -846,12 +842,13 @@ fn map_photo(row: &Row<'_>) -> rusqlite::Result<TimelinePhoto> {
         width: unsigned_u32(width.unwrap_or_default(), 3)?,
         height: unsigned_u32(height.unwrap_or_default(), 4)?,
         size_bytes: unsigned_u64(size_bytes, 5)?,
-        format: row.get::<_, String>(6)?.to_uppercase(),
-        taken_at: row.get(7)?,
+        mtime_ns: row.get(6)?,
+        format: row.get::<_, String>(7)?.to_uppercase(),
+        taken_at: row.get(8)?,
         time_source: TimeSource::from_db(&time_source)?,
-        fingerprint: row.get(9)?,
-        gps_lat: row.get(10)?,
-        gps_lon: row.get(11)?,
+        fingerprint: row.get(10)?,
+        gps_lat: row.get(11)?,
+        gps_lon: row.get(12)?,
     })
 }
 

@@ -52,8 +52,7 @@ function makePlaceholder(): THREE.Texture {
   return t
 }
 
-// Home gallery: bounded horizontal arc inspired by the circular WebGL reference,
-// adjusted for small real album counts so cards stay on screen.
+// Home gallery: a bounded horizontal arc. Albums stay in API order, newest first.
 
 export class FanScene {
   container: HTMLElement
@@ -65,7 +64,6 @@ export class FanScene {
   private cards: Card[] = []
 
   private scroll = { ease: 0.05, current: 0, target: 0, last: 0 }
-  private direction: 'left' | 'right' = 'right'
   private screen = { width: 0, height: 0 }
   private viewport = { width: 0, height: 0 }
   private isDown = false
@@ -152,15 +150,16 @@ export class FanScene {
     this.viewport = { height, width }
 
     for (const card of this.cards) card.onResize(this.screen, this.viewport)
-    for (let i = 0; i < this.cards.length; i++) this.cards[i].setLayout(i, this.cards.length)
+    for (let i = 0; i < this.cards.length; i++) this.cards[i].setLayout(i)
+    this.scroll.current = this.clampScroll(this.scroll.current)
+    this.scroll.target = this.clampScroll(this.scroll.target)
   }
 
   // ---- Update ----
   private update = () => {
     this.rafId = requestAnimationFrame(this.update)
     this.scroll.current = lerp(this.scroll.current, this.scroll.target, this.scroll.ease)
-    this.direction = this.scroll.current > this.scroll.last ? 'right' : 'left'
-    for (const card of this.cards) card.update(this.scroll, this.direction, this.viewport)
+    for (const card of this.cards) card.update(this.scroll, this.viewport)
     this.syncPosterChrome()
     this.syncActiveCaption()
     this.renderer.render(this.scene, this.camera)
@@ -170,7 +169,7 @@ export class FanScene {
   // ---- Events ----
   private onWheel = (e: WheelEvent) => {
     e.preventDefault()
-    this.scroll.target += e.deltaY * 0.018
+    this.scroll.target = this.clampScroll(this.scroll.target + e.deltaY * 0.018)
     clearTimeout(this.checkTimer)
     this.checkTimer = setTimeout(() => this.onCheck(), 200)
   }
@@ -193,7 +192,7 @@ export class FanScene {
     if (e.pointerId !== this.gesturePointer) return
     const distance = (this.startX - e.clientX) * 0.032
     if (isFanDrag(this.startX, e.clientX)) this.didDrag = true
-    this.scroll.target = this.scrollPos + distance
+    this.scroll.target = this.clampScroll(this.scrollPos + distance)
   }
 
   private onUp = (e: PointerEvent) => {
@@ -218,8 +217,14 @@ export class FanScene {
   private onCheck = () => {
     if (this.cards.length === 0) return
     const w = this.cards[0].width
-    const idx = Math.round(Math.abs(this.scroll.target) / w)
-    this.scroll.target = this.scroll.target < 0 ? -(w * idx) : w * idx
+    if (w <= 0) return
+    const index = Math.max(0, Math.min(this.cards.length - 1, Math.round(this.scroll.target / w)))
+    this.scroll.target = this.cards[index].x
+  }
+
+  private clampScroll(target: number) {
+    const lastCard = this.cards[this.cards.length - 1]
+    return Math.max(0, Math.min(target, lastCard?.x ?? 0))
   }
 
 
@@ -236,6 +241,11 @@ export class FanScene {
 
     const presentation = albumPresentation(card.album)
     const stats = getFanPosterStats(this.cards.map((item) => albumPhotoCount(item.album)))
+    const boundary = active === 0
+      ? '最新一册'
+      : active === this.cards.length - 1
+        ? '最早一册'
+        : '时间线中'
     this.cards.forEach((item) => { item.caption = null })
     this.captionLayer.innerHTML = `
       <div class="fan-photo-caption" aria-hidden="true">
@@ -255,7 +265,7 @@ export class FanScene {
         </div>
         <div class="fan-poster-stats"><span>${stats.albumCount}</span> albums<br><span>${stats.photoCount}</span> photos</div>
       </div>
-      <div class="fan-poster-bottom-caption">${active + 1} / ${this.cards.length} · 左右滑动浏览 · 轻点照片进入</div>
+      <div class="fan-poster-bottom-caption">${boundary} · ${active + 1} / ${this.cards.length} · 左右滑动浏览 · 轻点照片进入</div>
       <div class="fan-film-rail" aria-label="相册缩略图">
         ${this.cards.map((item, i) => `<button class="fan-film-frame ${i === active ? 'is-active' : ''}" type="button" aria-label="切换到 ${escapeAttr(item.album.name)}"><img src="${albumCoverThumbUrl(item.album)}" alt=""><span>${i + 1}</span></button>`).join('')}
       </div>
@@ -265,7 +275,7 @@ export class FanScene {
       button.addEventListener('click', () => {
         if (this.didDrag) return
         const target = this.cards[i]
-        if (target) this.scroll.target = target.x - target.extra
+        if (target) this.scroll.target = this.clampScroll(target.x)
       })
     })
   }
@@ -298,12 +308,8 @@ class Card {
   program: THREE.ShaderMaterial
   caption: HTMLElement | null = null
 
-  extra = 0
   x = 0
   width = 0
-  widthTotal = 0
-  isBefore = false
-  isAfter = false
 
   constructor(album: Album, index: number, total: number) {
     this.album = album
@@ -356,17 +362,15 @@ class Card {
     this.width = metrics.slot
   }
 
-  setLayout(index: number, total: number) {
-    this.widthTotal = this.width * total
+  setLayout(index: number) {
     this.x = this.width * index
   }
 
   update(
     scroll: { current: number; last: number },
-    direction: 'left' | 'right',
     viewport: { width: number; height: number },
   ) {
-    this.mesh.position.x = this.x - scroll.current - this.extra
+    this.mesh.position.x = this.x - scroll.current
     const pose = getFanCardPose(this.mesh.position.x, viewport.width, viewport.height)
     this.mesh.position.y = pose.y
     this.mesh.rotation.z = pose.rotationZ
@@ -374,17 +378,6 @@ class Card {
     const speed = scroll.current - scroll.last
     this.program.uniforms.uTime.value += 0.04
     this.program.uniforms.uSpeed.value = speed
-
-    const planeOffset = this.mesh.scale.x / 2
-    this.isBefore = this.mesh.position.x + planeOffset < -viewport.width * 0.62
-    this.isAfter = this.mesh.position.x - planeOffset > viewport.width * 0.62
-
-    if (direction === 'right' && this.isBefore) {
-      this.extra -= this.widthTotal
-    }
-    if (direction === 'left' && this.isAfter) {
-      this.extra += this.widthTotal
-    }
 
   }
 

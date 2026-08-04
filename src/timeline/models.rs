@@ -71,6 +71,7 @@ pub struct TimelinePhoto {
     pub width: u32,
     pub height: u32,
     pub size_bytes: u64,
+    pub mtime_ns: i64,
     pub format: String,
     pub taken_at: Option<String>,
     pub time_source: TimeSource,
