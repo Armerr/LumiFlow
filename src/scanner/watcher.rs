@@ -116,7 +116,7 @@ fn should_run_periodic_timeline_rescan(state: crate::timeline::ScanState) -> boo
 pub fn start_timeline(photos_path: PathBuf, service: Arc<crate::timeline::TimelineService>) {
     let periodic_service = service.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30 * 60));
+        let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -155,9 +155,14 @@ pub fn start_timeline(photos_path: PathBuf, service: Arc<crate::timeline::Timeli
                 continue;
             }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while tokio::time::timeout_at(deadline, rx.recv()).await.is_ok() {}
-            if let Err(error) = service.rescan().await {
-                tracing::error!("timeline watcher rescan failed: {error:#}");
+            let mut paths = event.paths;
+            while let Ok(Some(next)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+                if is_relevant_change(&next) { paths.extend(next.paths); }
+            }
+            paths.sort();
+            paths.dedup();
+            if let Err(error) = service.rescan_paths(paths).await {
+                tracing::error!("timeline watcher incremental rescan failed: {error:#}");
             }
         }
     });

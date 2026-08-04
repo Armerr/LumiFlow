@@ -227,6 +227,28 @@ impl TimelineService {
         }
         Ok(report)
     }
+
+    pub async fn rescan_paths(&self, paths: Vec<std::path::PathBuf>) -> Result<RescanReport> {
+        let _guard = self.scan_lock.lock().await;
+        let config = self.config.clone();
+        let db = self.db.clone();
+        let timezone = self.timezone;
+        let prepare_ai = self.ai.is_some();
+        let missing = paths.iter().filter(|path| !path.exists()).filter_map(|path| {
+            path.strip_prefix(&config.photos_path).ok().and_then(|value| value.to_str()).map(str::to_owned)
+        }).collect::<Vec<_>>();
+        let result = tokio::task::spawn_blocking(move || {
+            let scan = scan::scan_paths(&config.photos_path, &paths, &db, timezone, &scan::ExifAnalyzer)?;
+            let marked_missing = db.mark_missing_by_prefixes(&missing)?;
+            let places = build_place_resolver(&config, &db)?;
+            let albums = albums::rebuild_daily_albums(&db, timezone, places.as_ref())?;
+            let (enrichment, ai_inputs) = enrichment::enrich_local(&config, &db, prepare_ai)?;
+            Ok::<_, anyhow::Error>((RescanReport { scan: ScanReport { marked_missing, ..scan }, albums_count: albums.len(), enrichment }, ai_inputs))
+        }).await.context("incremental rescan task failed")??;
+        self.db.mark_scan_completed()?;
+        if let Some(ai) = &self.ai { schedule_ai_enrichment(self.db.clone(), ai.clone(), self.ai_schedule.clone(), result.1); }
+        Ok(result.0)
+    }
 }
 
 fn rescan_local_blocking(

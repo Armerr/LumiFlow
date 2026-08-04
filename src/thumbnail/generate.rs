@@ -116,33 +116,28 @@ pub fn generate_thumbnail(
 ) -> anyhow::Result<Vec<u8>> {
     let decoded = decode_image(source)?;
 
-    // Resize
-    let scale = target_width as f64 / decoded.width as f64;
-    let target_height = (decoded.height as f64 * scale) as u32;
+    const MAX_BYTES: usize = 15 * 1024;
+    let image = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.data)
+        .context("failed to create image from decoded data")?;
+    let mut width = target_width.min(decoded.width);
+    let mut encoder_quality = quality;
 
-    // For small images, don't upscale
-    let (out_w, out_h) = if target_width >= decoded.width {
-        (decoded.width, decoded.height)
-    } else {
-        (target_width, target_height)
-    };
-
-    let resized = if out_w == decoded.width && out_h == decoded.height {
-        decoded.data
-    } else {
-        // Use image crate for resizing
-        let img = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.data)
-            .context("failed to create image from decoded data")?;
-        let resized =
-            image::imageops::resize(&img, out_w, out_h, image::imageops::FilterType::Lanczos3);
-        resized.into_raw()
-    };
-
-    // Encode as WebP
-    let encoder = webp::Encoder::from_rgba(&resized, out_w, out_h);
-    let webp_data = encoder.encode(quality);
-
-    Ok(webp_data.to_vec())
+    loop {
+        let height = ((decoded.height as f64 * width as f64 / decoded.width as f64).round() as u32).max(1);
+        let resized = if width == decoded.width {
+            image.clone()
+        } else {
+            image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3)
+        };
+        let encoded = webp::Encoder::from_rgba(resized.as_raw(), width, height)
+            .encode(encoder_quality)
+            .to_vec();
+        if encoded.len() <= MAX_BYTES || width <= 48 {
+            return Ok(encoded);
+        }
+        width = ((width as f32 * 0.8).round() as u32).max(48);
+        encoder_quality = (encoder_quality - 10.0).max(20.0);
+    }
 }
 
 /// Get image dimensions without full decode.

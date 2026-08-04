@@ -32,7 +32,7 @@ describe('fan layout', () => {
       { width: 7.66, height: 16.56 },
     )
 
-    expect(metrics.slot).toBeGreaterThan(metrics.width * 1.22)
+    expect(metrics.slot).toBeGreaterThan(metrics.width * 0.7)
     expect(metrics.width).toBeGreaterThan(7.66 * 0.4)
   })
 

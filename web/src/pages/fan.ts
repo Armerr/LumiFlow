@@ -7,8 +7,12 @@ import { albumFilterQuery, type AlbumFilter } from '../shared/albumPresentation'
 import { mountFilterBar } from './fan/FilterBar'
 import './fan.scss'
 
-function renderFilteredEmpty(): string {
-  return '<div class="empty-state"><p>当前筛选条件下暂无相册</p></div>'
+export function renderFilteredEmpty(hasFilter: boolean): string {
+  if (!hasFilter) return '<div class="empty-state"><p>照片库中暂时没有可展示的相册</p></div>'
+  return `<div class="empty-state">
+    <p>当前时间没有相册</p>
+    <button class="empty-state-action" id="fan-filter-reset" type="button">查看全部相册</button>
+  </div>`
 }
 
 export function albumNavigationIdentity(album: Album): string {
@@ -21,6 +25,7 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
   let disposed = false
   let tearDownFilter: (() => void) | null = null
   let currentFilter = { ...initialFilter }
+  let availableDates: string[] = []
 
   const clearTimer = () => {
     clearTimeout(timer ?? undefined)
@@ -41,15 +46,41 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
     }
     if (disposed) return false
 
+    if (!query) {
+      availableDates = [...new Set(
+        data.albums
+          .map((album) => album.date_start)
+          .filter((date): date is string => /^\d{4}-\d{2}-\d{2}$/.test(date ?? '')),
+      )]
+    }
+
     scene?.dispose()
     scene = null
+    tearDownFilter?.()
+    tearDownFilter = null
 
     if (data.albums.length === 0) {
-      container.innerHTML = renderFilteredEmpty()
+      if (!query) {
+        container.innerHTML = renderFilteredEmpty(false)
+        return false
+      }
+
+      container.innerHTML = `<div id="fan-filter-bar"></div>${renderFilteredEmpty(true)}`
+      const filterRoot = container.querySelector<HTMLElement>('#fan-filter-bar')!
+      tearDownFilter = mountFilterBar(filterRoot, currentFilter, availableDates, {
+        onChange: (next) => {
+          currentFilter = next
+          void loadAlbums(container)
+        },
+      })
+      container.querySelector<HTMLButtonElement>('#fan-filter-reset')?.addEventListener('click', () => {
+        currentFilter = {}
+        void loadAlbums(container)
+      })
       return false
     }
 
-    container.innerHTML = '<div class="fan-filter-bar" id="fan-filter-bar"></div>'
+    container.innerHTML = '<div id="fan-filter-bar"></div>'
     scene = new FanScene(container)
     scene.onAlbumClick = (album: Album) => {
       router.navigate({ page: 'album', name: albumNavigationIdentity(album) })
@@ -58,8 +89,7 @@ export function createFanPage(initialFilter: AlbumFilter = {}): Page {
 
     const filterRoot = container.querySelector<HTMLElement>('#fan-filter-bar')
     if (filterRoot) {
-      tearDownFilter?.()
-      tearDownFilter = mountFilterBar(filterRoot, currentFilter, {
+      tearDownFilter = mountFilterBar(filterRoot, currentFilter, availableDates, {
         onChange: (next) => {
           currentFilter = next
           void loadAlbums(container)

@@ -63,9 +63,9 @@ export interface FanCardPose {
 export function getFanCardMetrics(screen: Size2D, viewport: Size2D): FanCardMetrics {
   const aspect = screen.width / Math.max(screen.height, 1)
   const isPortrait = aspect < 0.72
-  const width = viewport.width * (isPortrait ? 0.42 : aspect >= 1.55 ? 0.2 : 0.26)
-  const height = width * (isPortrait ? 1.18 : 1.32)
-  const slot = width * (isPortrait ? 1.28 : 1.08)
+  const width = viewport.width * (isPortrait ? 0.88 : aspect >= 1.55 ? 0.2 : 0.26)
+  const height = width * (isPortrait ? 1.25 : 1.32)
+  const slot = width * (isPortrait ? 0.74 : 1.08)
 
   return { width, height, slot }
 }

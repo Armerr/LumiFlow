@@ -6,6 +6,9 @@ use tokio::sync::Semaphore;
 mod generate;
 pub use generate::{generate_thumbnail, get_dimensions};
 
+pub const MAX_THUMBNAIL_BYTES: u64 = 15 * 1024;
+const THUMBNAIL_CACHE_VERSION: &str = "v2";
+
 /// On-demand thumbnail generator with bounded blocking decode concurrency.
 #[derive(Clone)]
 pub struct ThumbnailPool {
@@ -49,7 +52,7 @@ impl ThumbnailPool {
 
     /// Generate a single thumbnail synchronously for startup enrichment and watchers.
     pub fn generate_on_demand(source: &Path, thumb_path: &Path) -> anyhow::Result<Vec<u8>> {
-        let data = generate_thumbnail(source, 400, 80.0)?;
+        let data = generate_thumbnail(source, 320, 70.0)?;
         if let Some(parent) = thumb_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -79,7 +82,7 @@ pub fn timeline_thumb_is_fresh(data_path: &Path, photo_id: &str, fingerprint: &s
     timeline_thumb_path(data_path, photo_id).is_file()
         && timeline_thumb_fingerprint_path(data_path, photo_id).is_file()
         && std::fs::read_to_string(timeline_thumb_fingerprint_path(data_path, photo_id))
-            .is_ok_and(|cached| cached == fingerprint)
+            .is_ok_and(|cached| cached == format!("{THUMBNAIL_CACHE_VERSION}:{fingerprint}"))
 }
 
 /// Persist the source fingerprint alongside a generated timeline thumbnail.
@@ -92,7 +95,7 @@ pub fn write_timeline_thumb_fingerprint(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, fingerprint)
+    std::fs::write(path, format!("{THUMBNAIL_CACHE_VERSION}:{fingerprint}"))
 }
 
 fn timeline_thumb_fingerprint_path(data_path: &Path, photo_id: &str) -> PathBuf {

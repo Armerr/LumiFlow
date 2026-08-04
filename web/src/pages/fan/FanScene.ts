@@ -9,14 +9,10 @@ import { getActiveFanIndex, getFanAlbumAtScreenPoint, getFanCardMetrics, getFanC
 // custom uniforms/varyings here.
 const vertexShader = /* glsl */ `
 precision highp float;
-uniform float uTime;
-uniform float uSpeed;
 varying vec2 vUv;
 void main() {
   vUv = uv;
-  vec3 p = position;
-  p.z = (sin(p.x * 4.0 + uTime) * 1.5 + cos(p.y * 2.0 + uTime) * 1.5) * (0.1 + uSpeed * 0.5);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `
 
@@ -63,7 +59,7 @@ export class FanScene {
   private scene!: THREE.Scene
   private cards: Card[] = []
 
-  private scroll = { ease: 0.05, current: 0, target: 0, last: 0 }
+  private scroll = { ease: 0.05, current: 0, target: 0 }
   private screen = { width: 0, height: 0 }
   private viewport = { width: 0, height: 0 }
   private isDown = false
@@ -72,7 +68,6 @@ export class FanScene {
   private rafId = 0
   private observer: ResizeObserver | null = null
   private checkTimer: ReturnType<typeof setTimeout> | undefined
-  private captionLayer!: HTMLElement
   private posterChrome!: HTMLElement
   private activeAlbumIndex = -1
   private gesturePointer = -1
@@ -93,9 +88,6 @@ export class FanScene {
     this.renderer.setClearColor(0x000000, 0)
     this.container.classList.add('fan-page')
     this.container.appendChild(this.renderer.domElement)
-    this.captionLayer = document.createElement('div')
-    this.captionLayer.className = 'fan-caption-layer'
-    this.container.appendChild(this.captionLayer)
     this.posterChrome = document.createElement('div')
     this.posterChrome.className = 'fan-poster-chrome'
     this.container.appendChild(this.posterChrome)
@@ -122,7 +114,6 @@ export class FanScene {
     this.cards.forEach((c) => { this.scene.remove(c.mesh); c.dispose() })
     this.cards = []
 
-    this.captionLayer.innerHTML = ''
     this.posterChrome.innerHTML = ''
     this.activeAlbumIndex = -1
     const total = albums.length
@@ -161,9 +152,7 @@ export class FanScene {
     this.scroll.current = lerp(this.scroll.current, this.scroll.target, this.scroll.ease)
     for (const card of this.cards) card.update(this.scroll, this.viewport)
     this.syncPosterChrome()
-    this.syncActiveCaption()
     this.renderer.render(this.scene, this.camera)
-    this.scroll.last = this.scroll.current
   }
 
   // ---- Events ----
@@ -239,6 +228,8 @@ export class FanScene {
       return
     }
 
+    this.cards.forEach((item, index) => item.setLabelVisible(index === active))
+
     const presentation = albumPresentation(card.album)
     const stats = getFanPosterStats(this.cards.map((item) => albumPhotoCount(item.album)))
     const boundary = active === 0
@@ -246,16 +237,6 @@ export class FanScene {
       : active === this.cards.length - 1
         ? '最早一册'
         : '时间线中'
-    this.cards.forEach((item) => { item.caption = null })
-    this.captionLayer.innerHTML = `
-      <div class="fan-photo-caption" aria-hidden="true">
-        ${presentation.metadata ? `<div class="fan-photo-metadata">${escapeHtml(presentation.metadata)}</div>` : ''}
-        <div class="fan-photo-summary">${escapeHtml(presentation.summary)}</div>
-      </div>
-    `
-    const caption = this.captionLayer.firstElementChild
-    if (caption instanceof HTMLElement) card.caption = caption
-
     this.posterChrome.innerHTML = `
       <div class="fan-poster-top">
         <div>
@@ -279,10 +260,6 @@ export class FanScene {
       })
     })
   }
-  private syncActiveCaption() {
-    this.cards[this.activeAlbumIndex]?.syncCaption(this.viewport)
-  }
-
   dispose() {
     cancelAnimationFrame(this.rafId)
     clearTimeout(this.checkTimer)
@@ -294,7 +271,6 @@ export class FanScene {
     window.removeEventListener('pointercancel', this.onUp)
     this.cards.forEach((c) => c.dispose())
     this.container.classList.remove('fan-page', 'is-dragging')
-    this.captionLayer.remove()
     this.posterChrome.remove()
     this.renderer.dispose()
     this.renderer.domElement.remove()
@@ -306,7 +282,8 @@ class Card {
   mesh: THREE.Mesh
   album: Album
   program: THREE.ShaderMaterial
-  caption: HTMLElement | null = null
+  private labelMesh: THREE.Mesh
+  private labelTexture: THREE.CanvasTexture
 
   x = 0
   width = 0
@@ -326,12 +303,19 @@ class Card {
         tMap: { value: placeholder },
         uImageSizes: { value: [4, 4] },
         uPlaneSizes: { value: [1, 1] },
-        uTime: { value: 0 },
-        uSpeed: { value: 0 },
       },
     })
 
     this.mesh = new THREE.Mesh(geo, this.program)
+    const label = makeAlbumLabel(album)
+    this.labelMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 0.24),
+      new THREE.MeshBasicMaterial({ map: label.texture, transparent: true, depthWrite: false }),
+    )
+    this.labelTexture = label.texture
+    this.labelMesh.position.set(0, -0.38, 0.01)
+    this.labelMesh.renderOrder = 1
+    this.mesh.add(this.labelMesh)
 
     // Async load real texture
     const loader = new THREE.TextureLoader()
@@ -367,7 +351,7 @@ class Card {
   }
 
   update(
-    scroll: { current: number; last: number },
+    scroll: { current: number },
     viewport: { width: number; height: number },
   ) {
     this.mesh.position.x = this.x - scroll.current
@@ -375,32 +359,40 @@ class Card {
     this.mesh.position.y = pose.y
     this.mesh.rotation.z = pose.rotationZ
 
-    const speed = scroll.current - scroll.last
-    this.program.uniforms.uTime.value += 0.04
-    this.program.uniforms.uSpeed.value = speed
-
-  }
-
-  syncCaption(viewport: { width: number; height?: number }) {
-    if (!this.caption) return
-    const x = ((this.mesh.position.x / viewport.width) + 0.5) * 100
-    const isPortrait = (viewport.height ?? 0) > viewport.width * 1.35
-    const centerY = isPortrait
-      ? 70 - (this.mesh.position.y + 3.85) * 10
-      : 50 - (this.mesh.position.y / (viewport.height ?? 1)) * 100
-    const cardHeight = (this.mesh.scale.y / Math.max(viewport.height ?? 1, 1)) * 100
-    const y = centerY + cardHeight * (isPortrait ? 0.3 : 0.36)
-    const scale = Math.max(isPortrait ? 0.86 : 0.78, Math.min(1.08, 1 - Math.abs(this.mesh.position.x / viewport.width) * (isPortrait ? 0.12 : 0.22)))
-    this.caption.style.transform = `translate(-50%, -100%) translate(${x}vw, ${y}vh) rotate(${this.mesh.rotation.z}rad) scale(${scale})`
-    this.caption.style.opacity = `${Math.max(0.28, Math.min(1, 1 - Math.abs(this.mesh.position.x / viewport.width) * 0.75))}`
   }
 
   dispose() {
-    this.caption?.remove()
+    this.labelMesh.geometry.dispose()
+    ;(this.labelMesh.material as THREE.Material).dispose()
+    this.labelTexture.dispose()
     this.program.uniforms.tMap.value?.dispose()
     this.program.dispose()
     this.mesh.geometry.dispose()
   }
+
+  setLabelVisible(visible: boolean) {
+    this.labelMesh.visible = visible
+  }
+}
+
+function makeAlbumLabel(album: Album): { texture: THREE.CanvasTexture } {
+  const canvas = document.createElement('canvas')
+  canvas.width = 2048
+  canvas.height = 480
+  const context = canvas.getContext('2d')!
+  context.shadowColor = 'rgba(0, 0, 0, 0.72)'
+  context.shadowBlur = 12
+  context.shadowOffsetY = 3
+  context.fillStyle = 'rgba(238, 202, 132, 0.96)'
+  context.font = '600 66px "SF Mono", Menlo, monospace'
+  context.fillText(albumPresentation(album).metadata, 76, 282)
+  context.fillStyle = 'rgba(238, 242, 245, 0.98)'
+  context.font = '600 82px "Noto Serif SC", "Songti SC", serif'
+  context.fillText(`${albumPhotoCount(album)} 张照片`, 76, 398)
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.minFilter = THREE.LinearFilter
+  return { texture }
 }
 
 function albumPhotoCount(album: Album): number {

@@ -260,13 +260,16 @@ pub async fn serve_thumbnail(
     if thumb_path.exists() {
         let source_mtime = source.metadata().ok().and_then(|m| m.modified().ok());
         let thumb_mtime = thumb_path.metadata().ok().and_then(|m| m.modified().ok());
-        if source_mtime.is_some() && thumb_mtime.is_some() && thumb_mtime >= source_mtime {
+        let within_size_budget = thumb_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() <= thumbnail::MAX_THUMBNAIL_BYTES);
+        if within_size_budget && source_mtime.is_some() && thumb_mtime.is_some() && thumb_mtime >= source_mtime {
             return serve_cached_file(&thumb_path, "image/webp", &headers).await;
         }
     }
 
     // On-demand generation
-    match ThumbnailPool::generate_on_demand(&source, &thumb_path) {
+    match state.thumbnails.generate(source, thumb_path.clone()).await {
         Ok(_) => serve_cached_file(&thumb_path, "image/webp", &headers).await,
         Err(_) => Err(StatusCode::NOT_FOUND),
     }
@@ -288,9 +291,13 @@ pub async fn serve_thumbnail_by_id(
         .ok_or(StatusCode::NOT_FOUND)?;
     let thumb_path =
         crate::thumbnail::timeline_thumb_path(&state.config.data_path, &photo.id);
-    if !thumb_path.is_file() {
+    if !crate::thumbnail::timeline_thumb_is_fresh(
+        &state.config.data_path,
+        &photo.id,
+        &photo.fingerprint,
+    ) {
         let source = resolve_timeline_photo_path(service, &photo.relative_path)?;
-        ThumbnailPool::generate_on_demand(&source, &thumb_path)
+        state.thumbnails.generate(source, thumb_path.clone()).await
             .map_err(|_| StatusCode::NOT_FOUND)?;
         crate::thumbnail::write_timeline_thumb_fingerprint(
             &state.config.data_path,

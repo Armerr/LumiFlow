@@ -3,6 +3,7 @@ use crate::timeline::models::{
     TimeSource, TimelineAlbum, TimelineAlbumDetail, TimelinePhoto,
 };
 use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS album_ai_descriptions (
 
 CREATE TABLE IF NOT EXISTS timeline_scan_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    completed_at TEXT NOT NULL
+    completed_at TEXT NOT NULL,
+    cursor_mtime_ns INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_active_taken_at
@@ -288,12 +290,28 @@ impl TimelineDb {
     pub fn mark_scan_completed(&self) -> Result<()> {
         self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO timeline_scan_state (id, completed_at)
-                 VALUES (1, CURRENT_TIMESTAMP)
-                 ON CONFLICT(id) DO UPDATE SET completed_at = excluded.completed_at",
+                "INSERT INTO timeline_scan_state (id, completed_at, cursor_mtime_ns)
+                 VALUES (1, CURRENT_TIMESTAMP, COALESCE((SELECT MAX(mtime_ns) FROM photos WHERE status = 'active'), 0))
+                 ON CONFLICT(id) DO UPDATE SET
+                    completed_at = excluded.completed_at,
+                    cursor_mtime_ns = excluded.cursor_mtime_ns",
                 [],
             )?;
             Ok(())
+        })
+    }
+
+    pub fn mark_missing_by_prefixes(&self, prefixes: &[String]) -> Result<usize> {
+        self.with_transaction(|transaction| {
+            let mut changed = 0;
+            for prefix in prefixes {
+                changed += transaction.execute(
+                    "UPDATE photos SET status = 'missing', updated_at = CURRENT_TIMESTAMP
+                     WHERE status IN ('active', 'error') AND (relative_path = ?1 OR relative_path LIKE ?2)",
+                    params![prefix, format!("{prefix}/%")],
+                )?;
+            }
+            Ok(changed)
         })
     }
 
@@ -466,7 +484,7 @@ impl TimelineDb {
     }
 
     pub fn list_albums_filtered(&self, filter: TimelineFilter) -> Result<Vec<TimelineAlbum>> {
-        let date_where = date_filter_clause(&filter);
+        let date_where = date_filter_clause(&filter, "a.date_start", "WHERE");
         self.with_connection(|connection| {
             let sql = format!(
                 "SELECT a.id, a.display_name, NULLIF(d.description, ''), a.date_start, a.date_end,
@@ -543,7 +561,11 @@ impl TimelineDb {
                 return Ok(None);
             };
 
-            let date_where = date_filter_clause(&filter);
+            let date_where = date_filter_clause(
+                &filter,
+                "DATE(COALESCE(p.taken_at, datetime(p.mtime_ns / 1000000000, 'unixepoch')))",
+                "AND",
+            );
             let sql = format!(
                 "SELECT p.id, p.relative_path, p.filename, p.width, p.height, p.size_bytes,
                         p.mtime_ns, p.extension, p.taken_at, p.time_source, p.fingerprint, p.gps_lat, p.gps_lon
@@ -816,18 +838,22 @@ fn lock_connection(connection: &Arc<Mutex<Connection>>) -> Result<MutexGuard<'_,
 }
 
 
-fn date_filter_clause(filter: &TimelineFilter) -> String {
+fn date_filter_clause(filter: &TimelineFilter, column: &str, conjunction: &str) -> String {
     let mut conditions = Vec::new();
     if let Some(ref from) = filter.from {
-        conditions.push(format!("p.taken_at >= '{from}'"));
+        if let Ok(date) = NaiveDate::parse_from_str(from, "%Y-%m-%d") {
+            conditions.push(format!("{column} >= '{date}'"));
+        }
     }
     if let Some(ref to) = filter.to {
-        conditions.push(format!("p.taken_at <= '{to}T23:59:59'"));
+        if let Ok(date) = NaiveDate::parse_from_str(to, "%Y-%m-%d") {
+            conditions.push(format!("{column} <= '{date}'"));
+        }
     }
     if conditions.is_empty() {
         String::new()
     } else {
-        format!(" AND {}", conditions.join(" AND "))
+        format!(" {conjunction} {}", conditions.join(" AND "))
     }
 }
 fn map_photo(row: &Row<'_>) -> rusqlite::Result<TimelinePhoto> {

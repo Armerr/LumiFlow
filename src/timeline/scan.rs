@@ -200,6 +200,52 @@ pub fn scan_parallel(
     Ok(report)
 }
 
+/// Process only paths reported by the filesystem watcher. Missing paths are handled by the caller.
+pub fn scan_paths(
+    root: &Path,
+    paths: &[std::path::PathBuf],
+    db: &TimelineDb,
+    timezone: Tz,
+    analyzer: &impl Analyzer,
+) -> Result<ScanReport> {
+    let canonical_root = root.canonicalize()?;
+    let scan_id = make_scan_id();
+    let mut report = ScanReport::default();
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_file() {
+            files.push(path.clone());
+        } else if path.is_dir() {
+            files.extend(WalkDir::new(path).follow_links(false).into_iter().flatten()
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path()));
+        }
+    }
+    files.sort();
+    files.dedup();
+    for path in files {
+        if !is_supported(&path) { continue; }
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_root) { continue; }
+        let relative_path = normalized_relative_path(&canonical_root, &canonical_path)?;
+        let metadata = canonical_path.metadata()?;
+        let candidate = candidate(&relative_path, &metadata, &scan_id)?;
+        report.found += 1;
+        match db.upsert_candidate(&candidate)? {
+            AnalysisDecision::Reuse => report.reused += 1,
+            AnalysisDecision::Analyze => match analyzer.analyze(&canonical_path, &candidate.id, timezone) {
+                Ok(analysis) => { db.save_analysis(&analysis)?; report.analyzed += 1; }
+                Err(error) => {
+                    db.mark_analysis_error(&candidate.id)?;
+                    report.errors += 1;
+                    tracing::warn!(photo = %relative_path, error = %format!("{error:#}"), "incremental photo analysis failed");
+                }
+            },
+        }
+    }
+    Ok(report)
+}
+
 struct AnalysisJob {
     path: std::path::PathBuf,
     photo_id: String,

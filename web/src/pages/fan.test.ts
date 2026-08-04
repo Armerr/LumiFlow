@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { albumNavigationIdentity, createFanPage, renderScanStatus } from './fan'
+import { albumNavigationIdentity, createFanPage, renderFilteredEmpty, renderScanStatus } from './fan'
 import { api } from '../shared/api'
 
 afterEach(() => {
@@ -47,6 +47,16 @@ describe('startup scan screen', () => {
   })
 })
 
+describe('filtered empty state', () => {
+  test('keeps a clear route back to all albums', () => {
+    const html = renderFilteredEmpty(true)
+
+    expect(html).toContain('当前时间没有相册')
+    expect(html).toContain('查看全部相册')
+    expect(html).toContain('id="fan-filter-reset"')
+  })
+})
+
 describe('startup scan polling', () => {
   test('automatically loads albums after the scan becomes ready', async () => {
     vi.useFakeTimers()
@@ -62,7 +72,7 @@ describe('startup scan polling', () => {
     await vi.advanceTimersByTimeAsync(1000)
 
     expect(api.albums).toHaveBeenCalledTimes(1)
-    expect(container.innerHTML).toContain('暂无相册')
+    expect(container.innerHTML).toContain('暂时没有可展示的相册')
     page.unmount()
   })
 
